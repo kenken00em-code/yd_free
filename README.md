@@ -1,5 +1,9 @@
 # 🎬 دانلودر یوتیوب + ⬇️ دانلودر مستقیم فایل
 
+<div align="center">
+  <img src="download.gif" alt="Demo" width="500" />
+</div>
+
 <div dir="rtl">
 
 ## ⚠️ لطفاً توجه کنید
