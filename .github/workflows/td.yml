@@ -1,0 +1,321 @@
+---
+name: 03 - 📩 دانلودر تلگرام
+
+on:
+  workflow_dispatch:
+    inputs:
+      telegram_link:
+        description: '🔗 لینک پست تلگرام (مثال: https://t.me/channel/123)'
+        required: true
+        type: string
+
+jobs:
+  tg-download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - name: بررسی لینک تلگرام
+        run: |
+          if [ -z "${{ github.event.inputs.telegram_link }}" ]; then
+            echo ""
+            echo "❌ لینک تلگرام وارد نشده است!"
+            echo ""
+            echo "📌 راهنما:"
+            echo "   1️⃣ workflow را دوباره اجرا کنید"
+            echo "   2️⃣ در فیلد 'لینک پست تلگرام' آدرس پست را وارد کنید"
+            echo ""
+            exit 1
+          fi
+          echo "✅ لینک تلگرام دریافت شد"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure Git for Large Files
+        run: |
+          git config --global http.postBuffer 524288000
+          git config --global http.maxRequestBuffer 100M
+          git config --global core.compression 0
+          git config --global pack.windowMemory 256m
+          git config --global pack.packSizeLimit 100m
+          git config --global pack.threads 1
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          echo "Git configured for large file handling"
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl wget jq zip bc
+
+      - name: دانلود از تلگرام
+        run: |
+          TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
+          
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          BRANCH="${GITHUB_REF_NAME}"
+          
+          SPLIT_MB=45
+          SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
+          
+          BACKUP_DIR="/tmp/telegram_backup_$$"
+          mkdir -p "$BACKUP_DIR"
+          echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
+          
+          mkdir -p telegram_downloads
+          
+          echo "📩 Telegram Downloader"
+          echo "🔗 Link: $TELEGRAM_LINK"
+          echo ""
+
+          # Extract channel and message ID from t.me link
+          CHANNEL=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | cut -d'/' -f1)
+          MSG_ID=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | cut -d'/' -f2 | sed 's|?.*||')
+          
+          echo "📢 Channel: $CHANNEL"
+          echo "📝 Message ID: $MSG_ID"
+          echo ""
+
+          sanitize_name() {
+            echo "$1" | sed 's/ /-/g' | sed 's/　/-/g' | tr -s '-' | sed 's/[^a-zA-Z0-9_-]//g'
+          }
+
+          urlencode() {
+            python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
+          }
+
+          get_random_word() {
+            RANDOM_WORDS=("alpha" "beta" "gamma" "delta" "epsilon" "zeta" "theta" "kappa" "lambda" "sigma" "omega" "nova" "star" "moon" "sun" "sky" "cloud" "river" "ocean" "mountain")
+            echo "${RANDOM_WORDS[$RANDOM % ${#RANDOM_WORDS[@]}]}_$RANDOM"
+          }
+
+          get_unique_folder() {
+            local BASE_PATH="$1"
+            local NAME="$2"
+            if [ ! -d "$BASE_PATH/$NAME" ] && [ ! -d "$BACKUP_DIR/$NAME" ]; then
+              echo "$NAME"
+              return
+            fi
+            local RANDOM_SUFFIX=$(get_random_word)
+            while [ -d "$BASE_PATH/${NAME}_${RANDOM_SUFFIX}" ] || [ -d "$BACKUP_DIR/${NAME}_${RANDOM_SUFFIX}" ]; do
+              RANDOM_SUFFIX=$(get_random_word)
+            done
+            echo "${NAME}_${RANDOM_SUFFIX}"
+          }
+
+          # Download Telegram post page
+          EMBED_URL="https://t.me/${CHANNEL}/${MSG_ID}?embed=1"
+          echo "📥 Fetching: $EMBED_URL"
+          
+          curl -sL -o /tmp/telegram_page.html \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            "$EMBED_URL"
+          
+          if [ ! -s /tmp/telegram_page.html ]; then
+            echo "❌ Failed to fetch Telegram page"
+            exit 1
+          fi
+          
+          echo "✅ Page fetched successfully"
+          echo ""
+
+          # Extract text content
+          echo "📝 Extracting text content..."
+          TEXT_CONTENT=$(grep -oP 'class="tgme_widget_message_text"[^>]*>\K[^<]+' /tmp/telegram_page.html | head -1 || echo "")
+          
+          if [ -n "$TEXT_CONTENT" ]; then
+            # Decode HTML entities
+            TEXT_CONTENT=$(echo "$TEXT_CONTENT" | sed 's/&amp;/\&/g' | sed 's/&lt;/</g' | sed 's/&gt;/>/g' | sed 's/&quot;/"/g')
+            echo "📄 Text found: ${TEXT_CONTENT:0:100}..."
+            
+            FOLDER_NAME="telegram_${CHANNEL}_${MSG_ID}"
+            mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+            echo "$TEXT_CONTENT" > "$BACKUP_DIR/$FOLDER_NAME/message.txt"
+            echo "✅ Text saved"
+          else
+            echo "⚠️ No text content found"
+          fi
+
+          # Extract and download images
+          echo ""
+          echo "🖼️ Extracting images..."
+          IMAGE_URLS=$(grep -oP "url\('https://[^']+'\)" /tmp/telegram_page.html | sed "s/url('//" | sed "s/')//" || echo "")
+          
+          IMG_COUNT=0
+          for IMG_URL in $IMAGE_URLS; do
+            IMG_COUNT=$((IMG_COUNT + 1))
+            IMG_NAME="image_${IMG_COUNT}.jpg"
+            
+            echo "⬇️ Downloading image $IMG_COUNT: $IMG_NAME"
+            curl -sL -o "/tmp/${IMG_NAME}" \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              "$IMG_URL"
+            
+            if [ -f "/tmp/${IMG_NAME}" ] && [ -s "/tmp/${IMG_NAME}" ]; then
+              if [ ! -d "$BACKUP_DIR/$FOLDER_NAME" ]; then
+                FOLDER_NAME="telegram_${CHANNEL}_${MSG_ID}"
+                mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+              fi
+              cp "/tmp/${IMG_NAME}" "$BACKUP_DIR/$FOLDER_NAME/${IMG_NAME}"
+              IMG_SIZE=$(stat -c%s "/tmp/${IMG_NAME}" 2>/dev/null || echo 0)
+              echo "✅ Image $IMG_COUNT saved ($(( IMG_SIZE / 1024 )) KB)"
+            fi
+            rm -f "/tmp/${IMG_NAME}"
+          done
+          
+          if [ "$IMG_COUNT" -eq 0 ]; then
+            echo "⚠️ No images found"
+          else
+            echo "✅ Downloaded $IMG_COUNT images"
+          fi
+
+          # Extract and download videos
+          echo ""
+          echo "🎬 Extracting videos..."
+          VIDEO_URLS=$(grep -oP '<source src="[^"]+"' /tmp/telegram_page.html | grep -oP 'https://[^"]+' || echo "")
+          
+          VID_COUNT=0
+          for VID_URL in $VIDEO_URLS; do
+            VID_COUNT=$((VID_COUNT + 1))
+            VID_NAME="video_${VID_COUNT}.mp4"
+            
+            echo "⬇️ Downloading video $VID_COUNT: $VID_NAME"
+            curl -sL -o "/tmp/${VID_NAME}" \
+              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+              "$VID_URL"
+            
+            if [ -f "/tmp/${VID_NAME}" ] && [ -s "/tmp/${VID_NAME}" ]; then
+              if [ ! -d "$BACKUP_DIR/$FOLDER_NAME" ]; then
+                FOLDER_NAME="telegram_${CHANNEL}_${MSG_ID}"
+                mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+              fi
+              
+              VID_SIZE=$(stat -c%s "/tmp/${VID_NAME}" 2>/dev/null || echo 0)
+              echo "📦 Video size: $(( VID_SIZE / 1024 / 1024 )) MB"
+              
+              if [ "$VID_SIZE" -gt "$SPLIT_BYTES" ]; then
+                echo "📦 Splitting into ${SPLIT_MB}MB parts..."
+                cd /tmp
+                zip -0 -s ${SPLIT_MB}m "/tmp/video_${VID_COUNT}.zip" "${VID_NAME}"
+                cp /tmp/video_${VID_COUNT}.* "$BACKUP_DIR/$FOLDER_NAME/" 2>/dev/null || true
+                cd -
+              else
+                cp "/tmp/${VID_NAME}" "$BACKUP_DIR/$FOLDER_NAME/${VID_NAME}"
+              fi
+              echo "✅ Video $VID_COUNT saved"
+            else
+              echo "⚠️ Failed to download video $VID_COUNT"
+            fi
+            rm -f "/tmp/${VID_NAME}"
+          done
+          
+          if [ "$VID_COUNT" -eq 0 ]; then
+            echo "⚠️ No videos found"
+          else
+            echo "✅ Downloaded $VID_COUNT videos"
+          fi
+
+          # Create README for the download
+          if [ -d "$BACKUP_DIR/$FOLDER_NAME" ]; then
+            FOLDER_ENCODED=$(urlencode "${FOLDER_NAME}")
+            
+            {
+              echo "# 📩 Telegram Download: ${CHANNEL}/${MSG_ID}"
+              echo ""
+              echo "---"
+              echo ""
+              echo "## 📋 Information"
+              echo ""
+              echo "| Property | Value |"
+              echo "|----------|-------|"
+              echo "| **Channel** | @${CHANNEL} |"
+              echo "| **Message ID** | ${MSG_ID} |"
+              echo "| **Original Link** | [View Post](${TELEGRAM_LINK}) |"
+              echo "| **Date** | $(date '+%Y-%m-%d %H:%M:%S UTC') |"
+              echo ""
+              echo "---"
+              echo ""
+              echo "## 📁 Files"
+              echo ""
+              
+              for file in "$BACKUP_DIR/$FOLDER_NAME"/*; do
+                if [ -f "$file" ]; then
+                  BASENAME=$(basename "$file")
+                  SIZE=$(stat -c%s "$file" 2>/dev/null || echo 0)
+                  SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
+                  FILE_ENCODED=$(urlencode "${BASENAME}")
+                  RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/telegram_downloads/${FOLDER_ENCODED}/${FILE_ENCODED}"
+                  echo "| 📄 \`${BASENAME}\` | ${SIZE_MB} MB | [Download](${RAW_LINK}) |"
+                fi
+              done
+              
+              echo ""
+              echo "---"
+            } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
+            
+            echo "✅ README created"
+          fi
+
+          # Cleanup
+          rm -f /tmp/telegram_page.html
+
+          echo ""
+          echo "===== Downloaded files ====="
+          find "$BACKUP_DIR" -type f | head -50
+
+      - name: ذخیره‌سازی فایل‌های دانلود شده
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          
+          echo "📤 Saving downloaded files..."
+          BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+          BACKUP_FILE_COUNT=$(find "$BACKUP_DIR" -type f 2>/dev/null | wc -l)
+          
+          if [ "$BACKUP_FILE_COUNT" -eq 0 ]; then
+            echo "❌ No files to push. Exiting."
+            exit 1
+          fi
+          
+          echo "📁 Files found: $BACKUP_FILE_COUNT"
+          
+          git fetch origin "$BRANCH"
+          git reset --hard origin/"$BRANCH"
+          mkdir -p telegram_downloads
+          cp -r "$BACKUP_DIR"/* telegram_downloads/
+          
+          git add -A telegram_downloads/
+          
+          if ! git diff --cached --quiet; then
+            git commit -m "📩 Telegram download: ${{ github.event.inputs.telegram_link }} [skip ci]"
+            
+            PUSH_RETRY=0
+            while [ $PUSH_RETRY -lt 10 ]; do
+              PUSH_RETRY=$((PUSH_RETRY + 1))
+              if timeout 300 git push origin HEAD:"$BRANCH"; then
+                echo "✅ Push successful!"
+                break
+              else
+                echo "⚠️ Push failed, retry $PUSH_RETRY/10..."
+                sleep 5
+                git fetch origin "$BRANCH"
+                git reset --hard origin/"$BRANCH"
+                mkdir -p telegram_downloads
+                cp -r "$BACKUP_DIR"/* telegram_downloads/
+                git add -A telegram_downloads/
+                git diff --cached --quiet || git commit -m "📩 Telegram download [skip ci]"
+              fi
+            done
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "✅ All files pushed successfully!"
+          echo "=========================================="
