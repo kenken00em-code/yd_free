@@ -25,6 +25,7 @@ jobs:
             echo "📌 راهنما:"
             echo "   1️⃣ workflow را دوباره اجرا کنید"
             echo "   2️⃣ در فیلد 'لینک پست تلگرام' آدرس پست را وارد کنید"
+            echo "   3️⃣ مثال: https://t.me/channel_name/123"
             echo ""
             exit 1
           fi
@@ -75,15 +76,16 @@ jobs:
           echo ""
 
           # Extract channel and message ID from t.me link
-          CHANNEL=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | cut -d'/' -f1)
-          MSG_ID=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | cut -d'/' -f2 | sed 's|?.*||')
+          CLEAN_LINK=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | sed 's|/$||')
+          CHANNEL=$(echo "$CLEAN_LINK" | cut -d'/' -f1)
+          MSG_ID=$(echo "$CLEAN_LINK" | cut -d'/' -f2 | sed 's|?.*||')
           
-          echo "📢 Channel: $CHANNEL"
+          echo "📢 Channel: @$CHANNEL"
           echo "📝 Message ID: $MSG_ID"
           echo ""
 
           sanitize_name() {
-            echo "$1" | sed 's/ /-/g' | sed 's/　/-/g' | tr -s '-' | sed 's/[^a-zA-Z0-9_-]//g'
+            echo "$1" | sed 's/ /-/g' | sed 's/　/-/g' | tr -s '-' | sed 's/[^a-zA-Z0-9_\-\.]//g'
           }
 
           urlencode() {
@@ -95,26 +97,27 @@ jobs:
             echo "${RANDOM_WORDS[$RANDOM % ${#RANDOM_WORDS[@]}]}_$RANDOM"
           }
 
-          get_unique_folder() {
-            local BASE_PATH="$1"
-            local NAME="$2"
-            if [ ! -d "$BASE_PATH/$NAME" ] && [ ! -d "$BACKUP_DIR/$NAME" ]; then
-              echo "$NAME"
-              return
-            fi
-            local RANDOM_SUFFIX=$(get_random_word)
-            while [ -d "$BASE_PATH/${NAME}_${RANDOM_SUFFIX}" ] || [ -d "$BACKUP_DIR/${NAME}_${RANDOM_SUFFIX}" ]; do
-              RANDOM_SUFFIX=$(get_random_word)
-            done
-            echo "${NAME}_${RANDOM_SUFFIX}"
-          }
+          # Get unique folder name based on channel and message
+          BASE_FOLDER_NAME="tg_${CHANNEL}_${MSG_ID}"
+          FOLDER_NAME="${BASE_FOLDER_NAME}"
+          COUNTER=1
+          while [ -d "$BACKUP_DIR/$FOLDER_NAME" ]; do
+            COUNTER=$((COUNTER + 1))
+            FOLDER_NAME="${BASE_FOLDER_NAME}_${COUNTER}"
+          done
+          
+          mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+          echo "📁 Folder: $FOLDER_NAME"
+          echo ""
 
-          # Download Telegram post page
+          # Download Telegram post page (embed version)
           EMBED_URL="https://t.me/${CHANNEL}/${MSG_ID}?embed=1"
-          echo "📥 Fetching: $EMBED_URL"
+          echo "📥 Fetching post: $EMBED_URL"
           
           curl -sL -o /tmp/telegram_page.html \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" \
+            -H "Accept-Language: en-US,en;q=0.9" \
             "$EMBED_URL"
           
           if [ ! -s /tmp/telegram_page.html ]; then
@@ -125,149 +128,278 @@ jobs:
           echo "✅ Page fetched successfully"
           echo ""
 
-          # Extract text content
+          # Extract post title/text for folder naming
+          POST_TITLE=$(grep -oP 'class="tgme_widget_message_text"[^>]*>\K[^<]+' /tmp/telegram_page.html | head -1 | sed 's/<[^>]*>//g' | tr -d '\n\r' | cut -c1-50 || echo "")
+          if [ -n "$POST_TITLE" ]; then
+            POST_TITLE=$(sanitize_name "$POST_TITLE")
+            echo "📝 Post text: $POST_TITLE..."
+          fi
+
+          # Extract text content (full)
           echo "📝 Extracting text content..."
-          TEXT_CONTENT=$(grep -oP 'class="tgme_widget_message_text"[^>]*>\K[^<]+' /tmp/telegram_page.html | head -1 || echo "")
+          TEXT_BLOCK=$(sed -n '/tgme_widget_message_text/,/<\/div>/p' /tmp/telegram_page.html | sed 's/<[^>]*>//g' | sed 's/&amp;/\&/g' | sed 's/&lt;/</g' | sed 's/&gt;/>/g' | sed 's/&quot;/"/g' | sed 's/&#39;/'"'"'/g' | tr -s ' \n' || echo "")
           
-          if [ -n "$TEXT_CONTENT" ]; then
-            # Decode HTML entities
-            TEXT_CONTENT=$(echo "$TEXT_CONTENT" | sed 's/&amp;/\&/g' | sed 's/&lt;/</g' | sed 's/&gt;/>/g' | sed 's/&quot;/"/g')
-            echo "📄 Text found: ${TEXT_CONTENT:0:100}..."
-            
-            FOLDER_NAME="telegram_${CHANNEL}_${MSG_ID}"
-            mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
-            echo "$TEXT_CONTENT" > "$BACKUP_DIR/$FOLDER_NAME/message.txt"
-            echo "✅ Text saved"
+          if [ -n "$TEXT_BLOCK" ]; then
+            echo "$TEXT_BLOCK" > "$BACKUP_DIR/$FOLDER_NAME/post_text.txt"
+            echo "✅ Text saved to post_text.txt"
           else
             echo "⚠️ No text content found"
           fi
 
-          # Extract and download images
-          echo ""
-          echo "🖼️ Extracting images..."
-          IMAGE_URLS=$(grep -oP "url\('https://[^']+'\)" /tmp/telegram_page.html | sed "s/url('//" | sed "s/')//" || echo "")
-          
-          IMG_COUNT=0
-          for IMG_URL in $IMAGE_URLS; do
-            IMG_COUNT=$((IMG_COUNT + 1))
-            IMG_NAME="image_${IMG_COUNT}.jpg"
+          # Function to download any file
+          download_file() {
+            local FILE_URL="$1"
+            local FILE_NAME="$2"
+            local DESCRIPTION="$3"
             
-            echo "⬇️ Downloading image $IMG_COUNT: $IMG_NAME"
-            curl -sL -o "/tmp/${IMG_NAME}" \
-              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              "$IMG_URL"
+            echo "⬇️ Downloading $DESCRIPTION: $FILE_NAME"
             
-            if [ -f "/tmp/${IMG_NAME}" ] && [ -s "/tmp/${IMG_NAME}" ]; then
-              if [ ! -d "$BACKUP_DIR/$FOLDER_NAME" ]; then
-                FOLDER_NAME="telegram_${CHANNEL}_${MSG_ID}"
-                mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
-              fi
-              cp "/tmp/${IMG_NAME}" "$BACKUP_DIR/$FOLDER_NAME/${IMG_NAME}"
-              IMG_SIZE=$(stat -c%s "/tmp/${IMG_NAME}" 2>/dev/null || echo 0)
-              echo "✅ Image $IMG_COUNT saved ($(( IMG_SIZE / 1024 )) KB)"
+            # Clean filename
+            FILE_NAME=$(echo "$FILE_NAME" | sed 's|?.*||' | sed 's|#.*||')
+            
+            # Try to get filename from URL if not provided
+            if [ -z "$FILE_NAME" ] || [ "$FILE_NAME" = "download" ]; then
+              FILE_NAME=$(basename "$FILE_URL" | sed 's|?.*||' | sed 's|#.*||')
             fi
-            rm -f "/tmp/${IMG_NAME}"
-          done
-          
-          if [ "$IMG_COUNT" -eq 0 ]; then
-            echo "⚠️ No images found"
-          else
-            echo "✅ Downloaded $IMG_COUNT images"
-          fi
-
-          # Extract and download videos
-          echo ""
-          echo "🎬 Extracting videos..."
-          VIDEO_URLS=$(grep -oP '<source src="[^"]+"' /tmp/telegram_page.html | grep -oP 'https://[^"]+' || echo "")
-          
-          VID_COUNT=0
-          for VID_URL in $VIDEO_URLS; do
-            VID_COUNT=$((VID_COUNT + 1))
-            VID_NAME="video_${VID_COUNT}.mp4"
             
-            echo "⬇️ Downloading video $VID_COUNT: $VID_NAME"
-            curl -sL -o "/tmp/${VID_NAME}" \
+            if [ -z "$FILE_NAME" ]; then
+              FILE_NAME="download_$(date +%s)"
+            fi
+            
+            curl -sL -o "/tmp/${FILE_NAME}" \
               -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              "$VID_URL"
+              -H "Referer: https://t.me/" \
+              --max-time 300 \
+              "$FILE_URL"
             
-            if [ -f "/tmp/${VID_NAME}" ] && [ -s "/tmp/${VID_NAME}" ]; then
-              if [ ! -d "$BACKUP_DIR/$FOLDER_NAME" ]; then
-                FOLDER_NAME="telegram_${CHANNEL}_${MSG_ID}"
-                mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
-              fi
+            if [ -f "/tmp/${FILE_NAME}" ] && [ -s "/tmp/${FILE_NAME}" ]; then
+              FILE_SIZE=$(stat -c%s "/tmp/${FILE_NAME}" 2>/dev/null || echo 0)
+              FILE_SIZE_MB=$(( FILE_SIZE / 1024 / 1024 ))
               
-              VID_SIZE=$(stat -c%s "/tmp/${VID_NAME}" 2>/dev/null || echo 0)
-              echo "📦 Video size: $(( VID_SIZE / 1024 / 1024 )) MB"
-              
-              if [ "$VID_SIZE" -gt "$SPLIT_BYTES" ]; then
-                echo "📦 Splitting into ${SPLIT_MB}MB parts..."
+              if [ "$FILE_SIZE" -gt "$SPLIT_BYTES" ]; then
+                # Split large files
+                echo "📦 File is ${FILE_SIZE_MB}MB - splitting into ${SPLIT_MB}MB parts..."
                 cd /tmp
-                zip -0 -s ${SPLIT_MB}m "/tmp/video_${VID_COUNT}.zip" "${VID_NAME}"
-                cp /tmp/video_${VID_COUNT}.* "$BACKUP_DIR/$FOLDER_NAME/" 2>/dev/null || true
+                zip -0 -s ${SPLIT_MB}m "/tmp/${FILE_NAME}.zip" "${FILE_NAME}"
+                
+                # Move all parts to backup
+                for PART in /tmp/${FILE_NAME}.zip*; do
+                  if [ -f "$PART" ]; then
+                    cp "$PART" "$BACKUP_DIR/$FOLDER_NAME/"
+                    echo "   ✅ $(basename "$PART")"
+                  fi
+                done
                 cd -
               else
-                cp "/tmp/${VID_NAME}" "$BACKUP_DIR/$FOLDER_NAME/${VID_NAME}"
+                # Small file, copy directly
+                cp "/tmp/${FILE_NAME}" "$BACKUP_DIR/$FOLDER_NAME/${FILE_NAME}"
+                echo "   ✅ Saved (${FILE_SIZE_MB} MB)"
               fi
-              echo "✅ Video $VID_COUNT saved"
             else
-              echo "⚠️ Failed to download video $VID_COUNT"
+              echo "   ❌ Failed to download or empty file"
             fi
-            rm -f "/tmp/${VID_NAME}"
-          done
+            
+            rm -f "/tmp/${FILE_NAME}" /tmp/${FILE_NAME}.zip*
+          }
+
+          # Extract and download IMAGES
+          echo ""
+          echo "🖼️ Downloading images..."
           
-          if [ "$VID_COUNT" -eq 0 ]; then
-            echo "⚠️ No videos found"
-          else
-            echo "✅ Downloaded $VID_COUNT videos"
-          fi
+          # Method 1: Background images in style attributes
+          grep -oP "url\('https://[^']+'\)" /tmp/telegram_page.html | sed "s/url('//" | sed "s/')//" | sort -u > /tmp/image_urls.txt
+          
+          # Method 2: Direct image links
+          grep -oP 'https://cdn[^"]+\.(jpg|jpeg|png|webp|gif)' /tmp/telegram_page.html | sort -u >> /tmp/image_urls.txt
+          
+          # Method 3: Photo wrap links
+          grep -oP 'href="https://t\.me/[^"]+"' /tmp/telegram_page.html | grep -oP 'https://[^"]+' | sort -u >> /tmp/image_urls.txt
+          
+          IMG_COUNT=0
+          while IFS= read -r IMG_URL; do
+            [ -z "$IMG_URL" ] && continue
+            IMG_COUNT=$((IMG_COUNT + 1))
+            EXT=$(echo "$IMG_URL" | grep -oP '\.(jpg|jpeg|png|webp|gif)' | head -1 || echo ".jpg")
+            download_file "$IMG_URL" "image_${IMG_COUNT}${EXT}" "image $IMG_COUNT"
+          done < /tmp/image_urls.txt
+          
+          [ "$IMG_COUNT" -gt 0 ] && echo "✅ Downloaded $IMG_COUNT images" || echo "⚠️ No images found"
 
-          # Create README for the download
-          if [ -d "$BACKUP_DIR/$FOLDER_NAME" ]; then
-            FOLDER_ENCODED=$(urlencode "${FOLDER_NAME}")
-            
-            {
-              echo "# 📩 Telegram Download: ${CHANNEL}/${MSG_ID}"
-              echo ""
-              echo "---"
-              echo ""
-              echo "## 📋 Information"
-              echo ""
-              echo "| Property | Value |"
-              echo "|----------|-------|"
-              echo "| **Channel** | @${CHANNEL} |"
-              echo "| **Message ID** | ${MSG_ID} |"
-              echo "| **Original Link** | [View Post](${TELEGRAM_LINK}) |"
-              echo "| **Date** | $(date '+%Y-%m-%d %H:%M:%S UTC') |"
-              echo ""
-              echo "---"
-              echo ""
-              echo "## 📁 Files"
-              echo ""
-              
-              for file in "$BACKUP_DIR/$FOLDER_NAME"/*; do
-                if [ -f "$file" ]; then
-                  BASENAME=$(basename "$file")
-                  SIZE=$(stat -c%s "$file" 2>/dev/null || echo 0)
-                  SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc)
-                  FILE_ENCODED=$(urlencode "${BASENAME}")
-                  RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/telegram_downloads/${FOLDER_ENCODED}/${FILE_ENCODED}"
-                  echo "| 📄 \`${BASENAME}\` | ${SIZE_MB} MB | [Download](${RAW_LINK}) |"
-                fi
-              done
-              
-              echo ""
-              echo "---"
-            } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
-            
-            echo "✅ README created"
-          fi
+          # Extract and download VIDEOS
+          echo ""
+          echo "🎬 Downloading videos..."
+          
+          grep -oP 'https://[^"]+\.(mp4|webm|mov|mkv|avi)[^"]*' /tmp/telegram_page.html | sort -u > /tmp/video_urls.txt
+          grep -oP '<source src="[^"]+"' /tmp/telegram_page.html | grep -oP 'https://[^"]+' | sort -u >> /tmp/video_urls.txt
+          
+          VID_COUNT=0
+          while IFS= read -r VID_URL; do
+            [ -z "$VID_URL" ] && continue
+            VID_COUNT=$((VID_COUNT + 1))
+            download_file "$VID_URL" "video_${VID_COUNT}.mp4" "video $VID_COUNT"
+          done < /tmp/video_urls.txt
+          
+          [ "$VID_COUNT" -gt 0 ] && echo "✅ Downloaded $VID_COUNT videos" || echo "⚠️ No videos found"
 
-          # Cleanup
-          rm -f /tmp/telegram_page.html
+          # Extract and download DOCUMENTS (APK, PDF, ZIP, etc.)
+          echo ""
+          echo "📄 Downloading documents and all other files..."
+          
+          # Method 1: Document wrap links
+          grep -oP 'class="tgme_widget_message_document_wrap"[^>]*href="[^"]+"' /tmp/telegram_page.html | grep -oP 'href="[^"]+"' | sed 's/href="//' | sed 's/"//' | sort -u > /tmp/doc_urls.txt
+          
+          # Method 2: Any file links with common extensions
+          grep -oP 'https://[^"<> ]+\.(apk|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|txt|csv|json|xml|exe|msi|dmg|pkg|deb|rpm|iso|tar|gz|bz2|xz|epub|mobi|azw3|fb2|djvu|torrent|magnet)[^"<> ]*' /tmp/telegram_page.html | sort -u >> /tmp/doc_urls.txt
+          
+          # Method 3: Generic download links from Telegram CDN
+          grep -oP 'https://cdn[^"<> ]+' /tmp/telegram_page.html | grep -v '\.(jpg|jpeg|png|webp|gif|mp4|webm|mov|mkv|avi|css|js|ico|svg)' | sort -u >> /tmp/doc_urls.txt
+          
+          DOC_COUNT=0
+          while IFS= read -r DOC_URL; do
+            [ -z "$DOC_URL" ] && continue
+            
+            # Skip if already downloaded as image or video
+            if echo "$DOC_URL" | grep -qE '\.(jpg|jpeg|png|webp|gif|mp4|webm|mov|mkv|avi)$'; then
+              continue
+            fi
+            
+            DOC_COUNT=$((DOC_COUNT + 1))
+            
+            # Try to get original filename
+            ORIG_NAME=$(echo "$DOC_URL" | grep -oP '[^/]+(?=\?|$)' | head -1)
+            if [ -z "$ORIG_NAME" ]; then
+              ORIG_NAME="file_${DOC_COUNT}"
+            fi
+            
+            download_file "$DOC_URL" "$ORIG_NAME" "document $DOC_COUNT"
+          done < /tmp/doc_urls.txt
+          
+          [ "$DOC_COUNT" -gt 0 ] && echo "✅ Downloaded $DOC_COUNT documents/files" || echo "⚠️ No documents found"
+
+          # Extract and download AUDIO
+          echo ""
+          echo "🎵 Downloading audio files..."
+          
+          grep -oP 'https://[^"<> ]+\.(mp3|ogg|wav|flac|aac|m4a|opus|wma)[^"<> ]*' /tmp/telegram_page.html | sort -u > /tmp/audio_urls.txt
+          
+          AUD_COUNT=0
+          while IFS= read -r AUD_URL; do
+            [ -z "$AUD_URL" ] && continue
+            AUD_COUNT=$((AUD_COUNT + 1))
+            download_file "$AUD_URL" "audio_${AUD_COUNT}.mp3" "audio $AUD_COUNT"
+          done < /tmp/audio_urls.txt
+          
+          [ "$AUD_COUNT" -gt 0 ] && echo "✅ Downloaded $AUD_COUNT audio files" || echo "⚠️ No audio found"
+
+          # Final count
+          TOTAL_FILES=$(find "$BACKUP_DIR/$FOLDER_NAME" -type f 2>/dev/null | wc -l)
+          echo ""
+          echo "========================================"
+          echo "📊 Total files downloaded: $TOTAL_FILES"
+          echo "========================================"
+
+          # Create comprehensive README
+          echo ""
+          echo "📝 Creating README..."
+          
+          FOLDER_ENCODED=$(urlencode "${FOLDER_NAME}")
+          FOLDER_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/tree/${BRANCH}/telegram_downloads/${FOLDER_ENCODED}"
+          
+          {
+            echo "# 📩 Telegram Download: @${CHANNEL}/${MSG_ID}"
+            echo ""
+            
+            # Add post text preview if available
+            if [ -f "$BACKUP_DIR/$FOLDER_NAME/post_text.txt" ]; then
+              echo "> $(head -c 200 "$BACKUP_DIR/$FOLDER_NAME/post_text.txt" | tr '\n' ' ')..."
+              echo ""
+            fi
+            
+            echo "---"
+            echo ""
+            echo "## 📋 Information"
+            echo ""
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| **Channel** | [@${CHANNEL}](https://t.me/${CHANNEL}) |"
+            echo "| **Message ID** | ${MSG_ID} |"
+            echo "| **Original Post** | [Open in Telegram](${TELEGRAM_LINK}) |"
+            echo "| **Folder** | [Browse Files](${FOLDER_LINK}) |"
+            echo "| **Download Date** | $(date '+%Y-%m-%d %H:%M:%S UTC') |"
+            echo "| **Total Files** | ${TOTAL_FILES} |"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 📁 Download Files"
+            echo ""
+            echo "> 💡 **Tip:** Click on any file to download it directly"
+            echo ""
+            echo "| # | File | Size | Download |"
+            echo "|---|------|------|----------|"
+            
+            FILE_NUM=0
+            TOTAL_SIZE=0
+            
+            # List files sorted by type
+            for file in "$BACKUP_DIR/$FOLDER_NAME"/*; do
+              [ -f "$file" ] || continue
+              FILE_NUM=$((FILE_NUM + 1))
+              BASENAME=$(basename "$file")
+              SIZE=$(stat -c%s "$file" 2>/dev/null || echo 0)
+              TOTAL_SIZE=$((TOTAL_SIZE + SIZE))
+              SIZE_MB=$(echo "scale=2; $SIZE / 1024 / 1024" | bc 2>/dev/null || echo "0")
+              FILE_ENCODED=$(urlencode "${BASENAME}")
+              RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/telegram_downloads/${FOLDER_ENCODED}/${FILE_ENCODED}"
+              
+              # Determine file type emoji
+              case "${BASENAME##*.}" in
+                jpg|jpeg|png|webp|gif|bmp|svg) EMOJI="🖼️" ;;
+                mp4|webm|mov|mkv|avi) EMOJI="🎬" ;;
+                mp3|ogg|wav|flac|aac|m4a) EMOJI="🎵" ;;
+                apk) EMOJI="📱" ;;
+                pdf) EMOJI="📕" ;;
+                zip|rar|7z|tar|gz) EMOJI="📦" ;;
+                txt|md) EMOJI="📝" ;;
+                exe|msi|dmg|deb|rpm) EMOJI="💿" ;;
+                iso) EMOJI="💽" ;;
+                *) EMOJI="📄" ;;
+              esac
+              
+              echo "| ${FILE_NUM} | ${EMOJI} \`${BASENAME}\` | ${SIZE_MB} MB | [⬇️ Download](${RAW_LINK}) |"
+            done
+            
+            TOTAL_SIZE_MB=$(echo "scale=2; $TOTAL_SIZE / 1024 / 1024" | bc 2>/dev/null || echo "0")
+            echo ""
+            echo "| | **Total** | **${TOTAL_SIZE_MB} MB** | |"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 🗜️ How to Extract Split Files"
+            echo ""
+            echo "If you see files like \`filename.zip\`, \`filename.z01\`, \`filename.z02\`:"
+            echo ""
+            echo "1. Download **ALL parts** into one folder"
+            echo "2. Open the main \`.zip\` file with **7-Zip** or **WinRAR**"
+            echo "3. Extract — all parts combine automatically"
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 📱 Original Post"
+            echo ""
+            echo "🔗 [Click here to view on Telegram](${TELEGRAM_LINK})"
+            echo ""
+            echo "---"
+          } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
+          
+          echo "✅ README created"
+
+          # Cleanup temp files
+          rm -f /tmp/telegram_page.html /tmp/image_urls.txt /tmp/video_urls.txt /tmp/doc_urls.txt /tmp/audio_urls.txt
 
           echo ""
-          echo "===== Downloaded files ====="
-          find "$BACKUP_DIR" -type f | head -50
+          echo "===== Files in $FOLDER_NAME ====="
+          find "$BACKUP_DIR/$FOLDER_NAME" -type f -exec ls -lh {} \; | head -50
+          echo "===== Total: $TOTAL_FILES files ====="
 
       - name: ذخیره‌سازی فایل‌های دانلود شده
         run: |
