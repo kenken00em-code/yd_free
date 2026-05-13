@@ -1,28 +1,12 @@
----
-name: 03 - 📩 دانلودر تلگرام
+name: 03 - 📥 دانلود خودکار تلگرام
 
 on:
   workflow_dispatch:
     inputs:
       telegram_links:
-        description: '🔗 لینک‌های تلگرام (با فاصله، کاما یا خط جدید جدا کنید)'
+        description: '🔗 لینک‌های تلگرام (حداکثر 1000 عدد، جدا با کاما، فاصله یا خط جدید)'
         required: true
         type: string
-      split_threshold_mb:
-        description: '📦 حداکثر حجم هر قطعه (MB) - 0 = بدون تقسیم'
-        required: false
-        type: number
-        default: 90
-      subfolder:
-        description: '📁 زیرپوشه دلخواه (اختیاری - خالی = مستقیم داخل telegram_downloads)'
-        required: false
-        type: string
-        default: ''
-      clean_previous:
-        description: '🗑️ پاکسازی فایل‌های قبلی قبل از دانلود'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   contents: write
@@ -30,7 +14,7 @@ permissions:
 jobs:
   download:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 180
     permissions:
       contents: write
 
@@ -39,60 +23,38 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: 🗑️ پاکسازی فایل‌های قبلی
-        if: github.event.inputs.clean_previous == 'true'
+      - name: آماده سازی گیت برای فایلهای بزرگ
         run: |
-          if [ -d "telegram_downloads" ]; then
-            echo "🗑️ در حال حذف فایل‌های قبلی..."
-            rm -rf telegram_downloads
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add -A telegram_downloads/ 2>/dev/null || true
-            git commit -m "🗑️ پاکسازی فایل‌های قبلی [skip ci]" 2>/dev/null || true
-            git push 2>/dev/null || true
-            echo "✅ پاکسازی انجام شد"
-          fi
+          git config --global http.postBuffer 524288000
+          git config --global http.maxRequestBuffer 100M
+          git config --global core.compression 0
+          git config --global pack.windowMemory 256m
+          git config --global pack.packSizeLimit 100m
+          git config --global pack.threads 1
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
 
-      - name: 🔧 نصب ابزارها
+      - name: 🔧 نصب ابزارهای ضروری
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget zip unzip python3 python3-pip
-          pip3 install requests
+          sudo apt-get install -y zip unzip python3 python3-pip curl jq
 
-      - name: 🚀 دانلود فایل‌ها از تلگرام
-        env:
-          TEL_LINKS: ${{ github.event.inputs.telegram_links }}
-          SPLIT_MB: ${{ github.event.inputs.split_threshold_mb }}
-          SUBFOLDER: ${{ github.event.inputs.subfolder }}
+      - name: 🐍 نصب کتابخانه‌های پایتون
+        run: pip3 install requests
+
+      - name: 📝 ساخت اسکریپت دانلودر
         run: |
-          python3 << 'PYEOF'
-          import os, re, sys, json, time
+          cat > telegram_downloader.py << 'EOF'
+          #!/usr/bin/env python3
+          import os, sys, time, json, uuid, re
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor, as_completed
           import requests
-          import subprocess
 
-          # ── Config ──────────────────────────────────────────────
-          TEL_LINKS = os.environ.get("TEL_LINKS", "").strip()
-          SPLIT_MB = int(os.environ.get("SPLIT_MB", "0"))
-          SUBFOLDER = os.environ.get("SUBFOLDER", "").strip()
-
-          BASE_DIR = Path("telegram_downloads")
-          if SUBFOLDER:
-              BASE_DIR = BASE_DIR / SUBFOLDER
-          BASE_DIR.mkdir(parents=True, exist_ok=True)
-
-          HEADERS = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-              "Accept-Language": "en-US,en;q=0.5",
-          }
-
-          # ── Parse links ─────────────────────────────────────────
-          def parse_links(raw):
-              text = raw.replace(',', '\n').replace(' ', '\n')
+          def parse_links(raw_text):
+              text = raw_text.replace(',', '\n').replace(' ', '\n')
               lines = text.splitlines()
               links = []
               for line in lines:
@@ -101,298 +63,340 @@ jobs:
                       continue
                   if line.startswith('http'):
                       links.append(line)
-                  elif 't.me/' in line:
-                      links.append('https://' + line.lstrip('/'))
+                  else:
+                      if 't.me/' in line:
+                          links.append('https://' + line.lstrip('/'))
               seen = set()
-              unique = []
+              unique_links = []
               for l in links:
                   if l not in seen:
                       seen.add(l)
-                      unique.append(l)
-              if len(unique) > 1000:
-                  print(f"⚠️ بیش از 1000 لینک - فقط 1000 لینک اول")
-                  unique = unique[:1000]
-              print(f"✅ {len(unique)} لینک معتبر شناسایی شد")
-              return unique
+                      unique_links.append(l)
+              if len(unique_links) > 1000:
+                  print(f"⚠️ بیش از 1000 لینک تشخیص داده شد. فقط 1000 لینک اول پردازش می‌شود.")
+                  unique_links = unique_links[:1000]
+              print(f"✅ {len(unique_links)} لینک معتبر شناسایی شد.")
+              return unique_links
 
-          # ── Sanitize filename ───────────────────────────────────
-          def sanitize(name):
-              if not name.isascii():
-                  return os.urandom(8).hex() + (Path(name).suffix or ".bin")
-              clean = re.sub(r'[^a-zA-Z0-9._\-]', '_', name)
-              clean = re.sub(r'__+', '_', clean)
-              return clean
-
-          # ── Get post text for naming ────────────────────────────
-          def get_post_text(channel, msg_id):
-              try:
-                  url = f"https://t.me/{channel}/{msg_id}?embed=1"
-                  resp = requests.get(url, headers=HEADERS, timeout=15)
-                  match = re.search(r'class="tgme_widget_message_text"[^>]*>(.*?)</div>', resp.text, re.DOTALL)
-                  if match:
-                      text = re.sub(r'<[^>]+>', '', match.group(1))
-                      text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-                      text = re.sub(r'[^a-zA-Z0-9\u0600-\u06FF\s]', '', text)
-                      text = text.strip()[:60]
-                      if text:
-                          return text.replace(' ', '_')
-              except:
-                  pass
-              return f"{channel}_{msg_id}"
-
-          # ── Extract channel & msg_id from link ──────────────────
-          def parse_tg_link(link):
-              link = link.replace('https://t.me/', '').replace('http://t.me/', '').rstrip('/')
-              parts = link.split('/')
-              if len(parts) >= 2:
-                  return parts[0], parts[1].split('?')[0]
-              return parts[0], "0"
-
-          # ── Download file with resume ───────────────────────────
-          def download_file(url, dest, max_retries=5):
+          def download_with_resume(url, dest, headers, max_retries=10, chunk_size=64*1024):
               dest = Path(dest)
               dest.parent.mkdir(parents=True, exist_ok=True)
-              
+              temp = dest.with_name(f".{uuid.uuid4().hex}.partial")
+              downloaded = temp.stat().st_size if temp.exists() else 0
+              sess = requests.Session()
+              sess.headers.update(headers)
+
               for attempt in range(max_retries):
                   try:
-                      resp = requests.get(url, headers=HEADERS, stream=True, timeout=60)
+                      range_header = {"Range": f"bytes={downloaded}-"} if downloaded > 0 else {}
+                      resp = sess.get(url, stream=True, timeout=30, headers=range_header)
                       resp.raise_for_status()
                       total = int(resp.headers.get('content-length', 0))
-                      downloaded = 0
-                      with open(dest, 'wb') as f:
-                          for chunk in resp.iter_content(chunk_size=65536):
+                      if downloaded > 0:
+                          total += downloaded
+                      mode = 'ab' if downloaded > 0 else 'wb'
+                      with open(temp, mode) as f:
+                          for chunk in resp.iter_content(chunk_size=chunk_size):
                               if chunk:
                                   f.write(chunk)
                                   downloaded += len(chunk)
                                   if total > 0:
                                       pct = downloaded / total * 100
-                                      bar_len = 30
-                                      filled = int(bar_len * downloaded // total)
-                                      bar = '█' * filled + '░' * (bar_len - filled)
-                                      print(f"\r   |{bar}| {pct:.0f}% ({downloaded}/{total})", end='', flush=True)
+                                      bar = '█' * int(40 * downloaded // total) + '░' * (40 - int(40 * downloaded // total))
+                                      print(f"\rپیشرفت: |{bar}| {pct:.1f}% ({downloaded}/{total} بایت)", end='', flush=True)
                       print()
-                      if dest.stat().st_size > 0:
-                          return True, dest.stat().st_size
-                  except Exception as e:
-                      print(f"\r   ⚠️ تلاش {attempt+1}: {str(e)[:50]}")
+                      temp.replace(dest)
+                      return True, dest.stat().st_size
+                  except (requests.exceptions.ChunkedEncodingError,
+                          requests.exceptions.ConnectionError,
+                          requests.exceptions.Timeout) as e:
+                      print(f"\n⚠️ قطع ارتباط: {e}. تلاش {attempt+1}/{max_retries}")
                       time.sleep(2 ** attempt)
+                  except Exception as e:
+                      print(f"\n❌ خطای مرگبار: {e}")
+                      if temp.exists():
+                          temp.unlink()
+                      return False, 0
+              print("\n❌ تعداد تلاش‌ها به پایان رسید.")
+              if temp.exists():
+                  temp.unlink()
               return False, 0
 
-          # ── Extract all media URLs from Telegram embed page ─────
-          def extract_media_urls(channel, msg_id):
-              url = f"https://t.me/{channel}/{msg_id}?embed=1"
+          def fetch_direct_link(telegram_link, headers):
+              api = "https://telegramdownloader.net/proxy.php"
+              data = {"telegram_link": telegram_link}
               try:
-                  resp = requests.get(url, headers=HEADERS, timeout=15)
-                  html = resp.text
-              except:
-                  return [], None
-              
-              media_urls = []
-              
-              # Videos
-              for m in re.finditer(r'<source src="([^"]+)"', html):
-                  media_urls.append(m.group(1))
-              
-              # Document download links
-              for m in re.finditer(r'class="tgme_widget_message_document_wrap"[^>]*href="([^"]+)"', html):
-                  media_urls.append(m.group(1))
-              
-              # Photos - background images
-              for m in re.finditer(r"url\('([^']+)'\)", html):
-                  media_urls.append(m.group(1))
-              
-              # Photo/video wrap links
-              for m in re.finditer(r'class="tgme_widget_message_(?:photo|video)_wrap"[^>]*href="([^"]+)"', html):
-                  media_urls.append(m.group(1))
-              
-              # Any CDN file links (excluding CSS/JS/fonts)
-              for m in re.finditer(r'https://cdn[^"<>\s]+\.(?:apk|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|txt|exe|msi|dmg|iso|tar|gz|mp4|webm|mov|mkv|avi|mp3|ogg|wav|flac|aac|m4a|jpg|jpeg|png|webp|gif|bmp)[^"<>\s]*', html, re.I):
-                  media_urls.append(m.group(0))
-              
-              # Any t.me file links
-              for m in re.finditer(r'https://t\.me/[a-zA-Z0-9_/]+', html):
-                  link = m.group(0)
-                  if link not in media_urls and link != f"https://t.me/{channel}/{msg_id}":
-                      media_urls.append(link)
-              
-              # Remove duplicates
-              seen = set()
-              unique_media = []
-              for u in media_urls:
-                  if u not in seen:
-                      seen.add(u)
-                      unique_media.append(u)
-              
-              post_text = get_post_text(channel, msg_id)
-              return unique_media, post_text
+                  resp = requests.post(api, headers=headers, data=data, timeout=15)
+                  resp.raise_for_status()
+                  result = resp.json()
+                  raw_url = result.get('data', {}).get('data', {}).get('link')
+                  file_name = result.get('data', {}).get('data', {}).get('file_name')
+                  if not raw_url or not file_name:
+                      return None, None, "لینک مستقیم یافت نشد"
+                  return raw_url, file_name, None
+              except Exception as e:
+                  return None, None, str(e)
 
-          # ── Get extension from URL ──────────────────────────────
-          def get_ext(url):
-              for ext in ['apk', 'pdf', 'zip', 'rar', '7z', 'docx', 'doc', 'xlsx', 'xls',
-                          'pptx', 'ppt', 'txt', 'exe', 'msi', 'dmg', 'iso', 'tar', 'gz',
-                          'bz2', 'xz', 'mp4', 'webm', 'mov', 'mkv', 'avi', 'mp3', 'ogg',
-                          'wav', 'flac', 'aac', 'm4a', 'opus', 'jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp']:
-                  if f'.{ext}' in url.lower():
-                      return ext
-              return 'file'
+          def sanitize_name(name):
+              if not name.isascii():
+                  rand = os.urandom(8).hex()
+                  ext = Path(name).suffix
+                  if not ext:
+                      ext = ".bin"
+                  return f"{rand}{ext}"
+              clean = re.sub(r'[^a-zA-Z0-9._-]', '_', name)
+              clean = re.sub(r'__+', '_', clean)
+              return clean
 
-          # ── Process one link ────────────────────────────────────
-          def process_link(tg_link, base_dir):
-              print(f"\n{'='*60}")
-              print(f"🔗 {tg_link}")
-              
-              channel, msg_id = parse_tg_link(tg_link)
-              print(f"📢 @{channel} | 📝 {msg_id}")
-              
-              media_urls, post_text = extract_media_urls(channel, msg_id)
-              
-              if not media_urls:
-                  print("⚠️ هیچ فایلی در این پست یافت نشد")
-                  return None, 0, "بدون فایل"
-              
-              print(f"🔍 {len(media_urls)} فایل یافت شد")
-              
-              downloaded = []
-              for i, media_url in enumerate(media_urls, 1):
-                  ext = get_ext(media_url)
-                  if ext == 'jpeg':
-                      ext = 'jpg'
-                  
-                  # Create filename from post text
-                  if len(media_urls) == 1:
-                      fname = f"{post_text}.{ext}"
-                  else:
-                      fname = f"{post_text}_{i}.{ext}"
-                  
-                  fname = sanitize(fname)
-                  dest = base_dir / fname
-                  
-                  # Avoid overwrite
-                  counter = 1
-                  stem, suffix = dest.stem, dest.suffix
-                  while dest.exists():
-                      dest = base_dir / f"{stem}_{counter}{suffix}"
-                      counter += 1
-                  
-                  print(f"\n⬇️ [{i}/{len(media_urls)}] {dest.name}")
-                  
-                  success, size = download_file(media_url, dest)
-                  
-                  if success:
-                      size_mb = size / 1_048_576
-                      print(f"   ✅ {size_mb:.1f} MB")
-                      
-                      # Split if needed
-                      if SPLIT_MB > 0 and size > SPLIT_MB * 1_048_576:
-                          print(f"   ✂️ تقسیم به قطعه‌های {SPLIT_MB}MB...")
-                          zip_name = dest.with_suffix('.zip')
-                          subprocess.run(
-                              ['zip', '-0', '-s', f'{SPLIT_MB}m', str(zip_name), '-j', str(dest.name)],
-                              cwd=dest.parent, check=True
-                          )
-                          dest.unlink()
-                          for p in sorted(dest.parent.glob(f"{zip_name.stem}.z*")):
-                              if p.exists():
-                                  downloaded.append((p, p.stat().st_size))
-                          if zip_name.exists():
-                              downloaded.append((zip_name, zip_name.stat().st_size))
-                      else:
-                          downloaded.append((dest, size))
-                  else:
-                      print(f"   ❌ ناموفق")
-                      if dest.exists() and dest.stat().st_size == 0:
-                          dest.unlink()
-              
-              return downloaded, sum(s for _, s in downloaded), None
+          def process_one_link(link, base_dir, session_headers):
+              print(f"\n🔗 دریافت اطلاعات {link}")
+              url, fname, err = fetch_direct_link(link, session_headers)
+              if err:
+                  print(f"❌ خطا: {err}")
+                  return None, 0, err
+              print(f"📁 نام اصلی: {fname}")
+              dest = base_dir / fname
+              counter = 1
+              orig_stem = dest.stem
+              orig_suffix = dest.suffix
+              while dest.exists():
+                  dest = base_dir / f"{orig_stem}_{counter}{orig_suffix}"
+                  counter += 1
+              print(f"🚀 شروع دانلود...")
+              success, size = download_with_resume(url, dest, session_headers)
+              if not success:
+                  return None, 0, "دانلود ناموفق"
+              print(f"✅ دانلود کامل: {dest.name} ({size/1e6:.2f} MB)")
+              return dest, size, None
 
-          # ── Main ────────────────────────────────────────────────
           def main():
-              if not TEL_LINKS:
-                  print("❌ هیچ لینکی وارد نشده")
+              tel_links_env = os.environ.get("TEL_LINKS", "").strip()
+              if not tel_links_env:
+                  print("❌ هیچ لینکی وارد نشده.")
                   sys.exit(1)
-              
-              links = parse_links(TEL_LINKS)
+              links = parse_links(tel_links_env)
               if not links:
-                  print("❌ لینک معتبر یافت نشد")
+                  print("❌ هیچ لینک معتبری یافت نشد.")
                   sys.exit(1)
-              
-              all_downloaded = []
-              
-              for link in links:
-                  result, total_size, err = process_link(link, BASE_DIR)
-                  if result:
-                      all_downloaded.extend(result)
-              
-              if not all_downloaded:
-                  print("\n❌ هیچ فایلی دانلود نشد!")
+
+              base = Path("telegram")
+              base.mkdir(parents=True, exist_ok=True)
+
+              headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+              results = []
+              with ThreadPoolExecutor(max_workers=2) as executor:
+                  futures = {executor.submit(process_one_link, link, base, headers): link for link in links}
+                  for future in as_completed(futures):
+                      link = futures[future]
+                      try:
+                          dest, size, err = future.result()
+                          if err:
+                              print(f"🔴 لینک ناموفق: {link} ({err})")
+                          else:
+                              results.append((dest, size))
+                      except Exception as e:
+                          print(f"🔴 خطا در پردازش {link}: {e}")
+
+              if not results:
+                  print("❌ هیچ فایلی با موفقیت دانلود نشد.")
                   sys.exit(1)
-              
-              print(f"\n{'='*60}")
-              print(f"🎉 {len(all_downloaded)} فایل با موفقیت دانلود شد")
-              total_mb = sum(s for _, s in all_downloaded) / 1_048_576
-              print(f"📦 حجم کل: {total_mb:.1f} MB")
-              print(f"📁 مسیر: {BASE_DIR}")
-              for f, s in all_downloaded:
-                  print(f"   📄 {f.name} ({s/1_048_576:.1f} MB)")
+
+              renamed = []
+              for dest, size in results:
+                  safe_name = sanitize_name(dest.name)
+                  if safe_name != dest.name:
+                      new_path = dest.with_name(safe_name)
+                      dest.rename(new_path)
+                      print(f"🌐 تغییر نام: {dest.name} -> {safe_name}")
+                      renamed.append((new_path, size))
+                  else:
+                      renamed.append((dest, size))
+
+              print("\n🎉 همه عملیات با موفقیت پایان یافت.")
+              print("فایل‌های نهایی:")
+              for f, size in renamed:
+                  print(f"   {f} ({size/1e6:.1f} MB)")
 
           if __name__ == "__main__":
               main()
-          PYEOF
+          EOF
+          chmod +x telegram_downloader.py
+
+      - name: 🚀 اجرای دانلودر
+        run: |
+          export TEL_LINKS="${{ github.event.inputs.telegram_links }}"
+          python3 telegram_downloader.py
+
+      - name: 🗜️ فشرده‌سازی و تقسیم فایل‌ها به 90MB
+        run: |
+          SPLIT_MB=90
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          BRANCH="${GITHUB_REF_NAME}"
+
+          urlencode() {
+            python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$1"
+          }
+
+          if [ ! -d "telegram" ] || [ -z "$(ls -A telegram 2>/dev/null)" ]; then
+            echo "⚠️ هیچ فایلی برای پردازش وجود ندارد!"
+            exit 1
+          fi
+
+          # Create backup directory
+          BACKUP_DIR="/tmp/telegram_backup_$$"
+          mkdir -p "$BACKUP_DIR"
+
+          # Process each file in telegram directory
+          for FILE in telegram/*; do
+            [ -f "$FILE" ] || continue
+            
+            BASENAME=$(basename "$FILE")
+            FILENAME_NO_EXT="${BASENAME%.*}"
+            SIZE=$(stat -c%s "$FILE")
+            SIZE_MB=$(( SIZE / 1024 / 1024 ))
+
+            echo "Processing: $BASENAME (${SIZE_MB}MB)"
+            
+            # Create folder for this file
+            FOLDER_NAME=$(echo "$FILENAME_NO_EXT" | sed 's/ /-/g' | tr -s '-')
+            mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
+
+            if [ "$SIZE" -gt $(( SPLIT_MB * 1024 * 1024 )) ]; then
+              echo "  Splitting into ${SPLIT_MB}MB parts..."
+              zip -0 -s ${SPLIT_MB}m "$BACKUP_DIR/$FOLDER_NAME/${FOLDER_NAME}.zip" "$FILE"
+            else
+              echo "  File is small enough, archiving directly..."
+              zip -0 "$BACKUP_DIR/$FOLDER_NAME/${FOLDER_NAME}.zip" "$FILE"
+            fi
+
+            # Generate README.md for this file
+            FOLDER_ENCODED=$(urlencode "$FOLDER_NAME")
+            README_FILE="$BACKUP_DIR/$FOLDER_NAME/README.md"
+            
+            {
+              echo "# 📥 $FILENAME_NO_EXT"
+              echo ""
+              echo "## 📁 File Information"
+              echo ""
+              echo "| Property | Value |"
+              echo "|----------|-------|"
+              echo "| **File Name** | \`$BASENAME\` |"
+              echo "| **Total Size** | **${SIZE_MB} MB** |"
+              echo "| **Status** | **Complete ✅** |"
+              echo ""
+              echo "---"
+              echo ""
+              echo "## 📥 Download Links"
+              echo ""
+              
+              PART_COUNT=0
+              for PART in $(ls "$BACKUP_DIR/$FOLDER_NAME/"*.zip "$BACKUP_DIR/$FOLDER_NAME/"*.z[0-9]* 2>/dev/null | sort -V); do
+                [ -f "$PART" ] || continue
+                PART_COUNT=$((PART_COUNT + 1))
+                PART_BASENAME=$(basename "$PART")
+                PART_ENCODED=$(urlencode "$PART_BASENAME")
+                PART_SIZE=$(stat -c%s "$PART")
+                PART_SIZE_MB=$(echo "scale=2; $PART_SIZE / 1024 / 1024" | bc)
+                RAW_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/raw/${BRANCH}/telegram/${FOLDER_ENCODED}/${PART_ENCODED}"
+                echo "| **Part $PART_COUNT** | \`$PART_BASENAME\` (${PART_SIZE_MB}MB) | [⬇️ Download]($RAW_LINK) |"
+              done
+              
+              echo ""
+              echo "---"
+              echo ""
+              echo "## 📖 How to Extract"
+              echo ""
+              echo "1. Download **all parts** into the **same folder**"
+              echo "2. Open/extract \`${FOLDER_NAME}.zip\` — other parts are found automatically"
+              echo ""
+              echo "| OS | Instructions |"
+              echo "|----|-------------|"
+              echo "| **Windows** | Right-click \`${FOLDER_NAME}.zip\` → Extract Here (7-Zip or WinRAR) |"
+              echo "| **Mac** | Double-click \`${FOLDER_NAME}.zip\` or use [The Unarchiver](https://theunarchiver.com/) |"
+              echo "| **Linux** | \`unzip '${FOLDER_NAME}.zip'\` or right-click → Extract |"
+              echo "| **Android** | Use [ZArchiver](https://play.google.com/store/apps/details?id=ru.zdevs.zarchiver) → tap the main .zip file |"
+              echo ""
+              echo "---"
+              echo ""
+              echo "*Downloaded via Telegram Downloader Bot*"
+            } > "$README_FILE"
+            
+            echo "  ✅ Created $PART_COUNT part(s) and README.md"
+          done
+
+          # Generate main README for telegram folder
+          MAIN_README="telegram/README.md"
+          {
+            echo "# 📥 Telegram Downloads"
+            echo ""
+            echo "## 📊 Downloaded Files"
+            echo ""
+            echo "| # | File | Size | Download Link |"
+            echo "|---|------|------|---------------|"
+            
+            NUM=0
+            for FOLDER in "$BACKUP_DIR"/*/; do
+              [ -d "$FOLDER" ] || continue
+              FOLDER_NAME=$(basename "$FOLDER")
+              NUM=$((NUM + 1))
+              FOLDER_ENCODED=$(urlencode "$FOLDER_NAME")
+              FOLDER_LINK="https://github.com/${REPO_OWNER}/${REPO_NAME}/tree/${BRANCH}/telegram/${FOLDER_ENCODED}"
+              
+              TOTAL_SIZE=0
+              for PART in "$FOLDER"/*.zip "$FOLDER"/*.z[0-9]* 2>/dev/null; do
+                [ -f "$PART" ] || continue
+                SIZE=$(stat -c%s "$PART")
+                TOTAL_SIZE=$((TOTAL_SIZE + SIZE))
+              done
+              TOTAL_SIZE_MB=$(echo "scale=1; $TOTAL_SIZE / 1024 / 1024" | bc)
+              
+              echo "| $NUM | \`$FOLDER_NAME\` | ${TOTAL_SIZE_MB}MB | [📁 Open Folder]($FOLDER_LINK) |"
+            done
+            
+            echo ""
+            echo "---"
+            echo ""
+            echo "## 📖 Instructions"
+            echo ""
+            echo "1. Click on the folder link for the file you want"
+            echo "2. Download all parts from that folder"
+            echo "3. Put all parts in the same folder and extract the main `.zip` file"
+            echo "4. Other parts are found automatically during extraction"
+            echo ""
+            echo "---"
+            echo "*Last updated: $(date -u +'%Y-%m-%d %H:%M UTC')*"
+          } > "$MAIN_README"
+
+          # Copy everything to telegram folder
+          cp -r "$BACKUP_DIR"/* telegram/
 
       - name: 📤 ارسال فایل‌ها به مخزن
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A telegram/
           
-          if [ ! -d "telegram_downloads" ] || [ -z "$(find telegram_downloads -type f ! -name '*.partial' 2>/dev/null)" ]; then
-            echo "❌ هیچ فایلی برای ارسال وجود ندارد"
-            exit 1
+          if git diff --cached --quiet; then
+            echo "✅ No changes to commit."
+            exit 0
           fi
+
+          git commit -m "Telegram downloads - automatic 90MB split [skip ci]"
           
-          echo "📤 ارسال فایل‌ها..."
-          
-          # Collect all files
-          mapfile -t ALL_FILES < <(find telegram_downloads -type f ! -name "*.partial")
-          TOTAL=${#ALL_FILES[@]}
-          echo "📁 $TOTAL فایل برای ارسال"
-          
-          # Push in batches by size
-          BATCH=()
-          BATCH_SIZE=0
-          MAX_BATCH_MB=100
-          
-          push_batch() {
-            if [ ${#BATCH[@]} -eq 0 ]; then return; fi
-            echo "📦 ارسال دسته (${BATCH_SIZE}MB, ${#BATCH[@]} فایل)..."
-            git add "${BATCH[@]}"
-            git commit -m "📩 Telegram download batch [skip ci]" 2>/dev/null || true
-            
-            for attempt in 1 2 3 4 5; do
-              if timeout 120 git push origin "${GITHUB_REF_NAME}"; then
-                echo "   ✅ دسته ارسال شد"
-                return 0
+          for i in 1 2 3 4 5; do
+            echo "Push attempt $i/5..."
+            if timeout 300 git push origin ${GITHUB_REF_NAME} 2>&1; then
+              echo "✅ Push successful!"
+              exit 0
+            else
+              if [ $i -lt 5 ]; then
+                echo "⚠️ Push failed, retrying in 10 seconds..."
+                sleep 10
+                git fetch origin ${GITHUB_REF_NAME}
+                git reset --hard origin/${GITHUB_REF_NAME}
               fi
-              echo "   ⚠️ تلاش $attempt ناموفق..."
-              sleep 5
-            done
-            echo "   ❌ ارسال دسته ناموفق"
-            return 1
-          }
-          
-          for file in "${ALL_FILES[@]}"; do
-            SIZE=$(( $(stat -c%s "$file" 2>/dev/null || echo 0) / 1048576 ))
-            if [ $((BATCH_SIZE + SIZE)) -gt $MAX_BATCH_MB ] && [ ${#BATCH[@]} -gt 0 ]; then
-              push_batch
-              BATCH=()
-              BATCH_SIZE=0
             fi
-            BATCH+=("$file")
-            BATCH_SIZE=$((BATCH_SIZE + SIZE))
           done
           
-          push_batch
-          
-          echo ""
-          echo "=========================================="
-          echo "✅ تمام فایل‌ها با موفقیت ارسال شدند!"
-          echo "=========================================="
+          echo "❌ Push failed after 5 attempts"
+          exit 1
