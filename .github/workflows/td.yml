@@ -1,3 +1,4 @@
+---
 name: 03 - 📩 دانلودر تلگرام
 
 on:
@@ -15,11 +16,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: بررسی لینک تلگرام
+      - name: Check Telegram link provided
         run: |
           if [ -z "${{ github.event.inputs.telegram_link }}" ]; then
             echo ""
             echo "❌ لینک تلگرام وارد نشده است!"
+            echo ""
+            echo "📌 راهنما:"
+            echo "   1️⃣ workflow را دوباره اجرا کنید"
+            echo "   2️⃣ در فیلد 'لینک پست تلگرام' آدرس پست را وارد کنید"
             echo ""
             exit 1
           fi
@@ -31,263 +36,27 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Configure Git for Large Files
-        run: |
-          git config --global http.postBuffer 524288000
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y curl wget jq zip unzip
+          pip install beautifulsoup4 requests yt-dlp
 
-      - name: دانلود از تلگرام با پشتیبانی از تمام فایل‌ها
+      - name: Download media from Telegram
         run: |
-          TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
-          
-          REPO_OWNER="${{ github.repository_owner }}"
-          REPO_NAME="${{ github.event.repository.name }}"
-          BRANCH="${GITHUB_REF_NAME}"
-          
-          SPLIT_MB=45
-          
-          BACKUP_DIR="/tmp/telegram_backup_$$"
-          mkdir -p "$BACKUP_DIR"
-          echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
-          
-          mkdir -p telegram_downloads
-          
-          echo "📩 Telegram Downloader"
-          echo "🔗 Link: $TELEGRAM_LINK"
-          echo ""
+          python download_telegram.py "${{ github.event.inputs.telegram_link }}"
 
-          # Extract channel and message ID
-          CHANNEL=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | cut -d'/' -f1)
-          MSG_ID=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | cut -d'/' -f2 | sed 's|?.*||')
-          
-          echo "📢 Channel: $CHANNEL"
-          echo "📝 Message ID: $MSG_ID"
-          echo ""
-
-          # Create folder
-          FOLDER_NAME="telegram_${CHANNEL}_${MSG_ID}"
-          mkdir -p "$BACKUP_DIR/$FOLDER_NAME"
-
-          # Use Telegram API to get file info
-          echo "📥 Fetching Telegram post data..."
-          
-          TG_API_URL="https://tg.i-c-a.su/json/${CHANNEL}/${MSG_ID}"
-          curl -sL -o /tmp/post_data.json "$TG_API_URL"
-          
-          if [ -s /tmp/post_data.json ]; then
-            echo "✅ Got data from Telegram API"
-            
-            # Extract text
-            TEXT=$(cat /tmp/post_data.json | jq -r '.text // ""')
-            if [ -n "$TEXT" ] && [ "$TEXT" != "null" ] && [ "$TEXT" != "" ]; then
-              echo "$TEXT" > "$BACKUP_DIR/$FOLDER_NAME/message.txt"
-              echo "✅ Text saved"
-            fi
-            
-            # Extract documents (exe, apk, pdf, zip, etc)
-            DOC_COUNT=$(cat /tmp/post_data.json | jq '.document | length' 2>/dev/null || echo "0")
-            
-            if [ "$DOC_COUNT" != "0" ] && [ "$DOC_COUNT" != "null" ]; then
-              echo "📁 Found $DOC_COUNT document(s)"
-              for i in $(seq 0 $((DOC_COUNT - 1))); do
-                FILE_NAME=$(cat /tmp/post_data.json | jq -r ".document[$i].file_name // \"document_$i\"")
-                echo "📄 Downloading: $FILE_NAME"
-                
-                curl -sL -o "$BACKUP_DIR/$FOLDER_NAME/$FILE_NAME" \
-                  "https://tg.i-c-a.su/dl/${CHANNEL}/${MSG_ID}/$FILE_NAME"
-                
-                if [ -f "$BACKUP_DIR/$FOLDER_NAME/$FILE_NAME" ] && [ -s "$BACKUP_DIR/$FOLDER_NAME/$FILE_NAME" ]; then
-                  FILE_SIZE=$(stat -c%s "$BACKUP_DIR/$FOLDER_NAME/$FILE_NAME" 2>/dev/null || echo 0)
-                  echo "✅ Downloaded: $FILE_NAME ($(( FILE_SIZE / 1024 / 1024 )) MB)"
-                fi
-              done
-            fi
-            
-            # Extract videos
-            VIDEO_COUNT=$(cat /tmp/post_data.json | jq '.video | length' 2>/dev/null || echo "0")
-            if [ "$VIDEO_COUNT" != "0" ] && [ "$VIDEO_COUNT" != "null" ]; then
-              echo "🎬 Found $VIDEO_COUNT video(s)"
-              for i in $(seq 0 $((VIDEO_COUNT - 1))); do
-                VIDEO_NAME=$(cat /tmp/post_data.json | jq -r ".video[$i].file_name // \"video_$i.mp4\"")
-                echo "🎬 Downloading: $VIDEO_NAME"
-                
-                curl -sL -o "$BACKUP_DIR/$FOLDER_NAME/$VIDEO_NAME" \
-                  "https://tg.i-c-a.su/dl/${CHANNEL}/${MSG_ID}/$VIDEO_NAME"
-                
-                if [ -f "$BACKUP_DIR/$FOLDER_NAME/$VIDEO_NAME" ]; then
-                  echo "✅ Video downloaded"
-                fi
-              done
-            fi
-            
-            # Extract photos
-            PHOTO_COUNT=$(cat /tmp/post_data.json | jq '.photo | length' 2>/dev/null || echo "0")
-            if [ "$PHOTO_COUNT" != "0" ] && [ "$PHOTO_COUNT" != "null" ]; then
-              echo "🖼️ Found $PHOTO_COUNT photo(s)"
-              for i in $(seq 0 $((PHOTO_COUNT - 1))); do
-                PHOTO_NAME="photo_$((i+1)).jpg"
-                echo "🖼️ Downloading: $PHOTO_NAME"
-                
-                curl -sL -o "$BACKUP_DIR/$FOLDER_NAME/$PHOTO_NAME" \
-                  "https://tg.i-c-a.su/dl/${CHANNEL}/${MSG_ID}/$PHOTO_NAME"
-                
-                if [ -f "$BACKUP_DIR/$FOLDER_NAME/$PHOTO_NAME" ]; then
-                  echo "✅ Photo downloaded"
-                fi
-              done
-            fi
-            
-            # Extract audio files
-            AUDIO_COUNT=$(cat /tmp/post_data.json | jq '.audio | length' 2>/dev/null || echo "0")
-            if [ "$AUDIO_COUNT" != "0" ] && [ "$AUDIO_COUNT" != "null" ]; then
-              echo "🎵 Found $AUDIO_COUNT audio file(s)"
-              for i in $(seq 0 $((AUDIO_COUNT - 1))); do
-                AUDIO_NAME=$(cat /tmp/post_data.json | jq -r ".audio[$i].file_name // \"audio_$i.mp3\"")
-                echo "🎵 Downloading: $AUDIO_NAME"
-                
-                curl -sL -o "$BACKUP_DIR/$FOLDER_NAME/$AUDIO_NAME" \
-                  "https://tg.i-c-a.su/dl/${CHANNEL}/${MSG_ID}/$AUDIO_NAME"
-              done
-            fi
-            
-          else
-            echo "⚠️ API method failed, trying direct page parsing..."
-            
-            # Fallback: download the HTML page and extract links
-            curl -sL -o /tmp/telegram_page.html \
-              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              "https://t.me/${CHANNEL}/${MSG_ID}?embed=1"
-            
-            # Extract all file download links
-            grep -oP 'https://[^"]+\.(exe|apk|zip|rar|7z|pdf|doc|docx|xls|xlsx|txt|mp4|mp3|jpg|jpeg|png|gif|webm|mkv|avi|mov|bin|dmg|iso|img|msi|deb|rpm|sh|bat|ps1|py|js|html|css|json|xml|sql|db|csv|log|ini|cfg|conf|yaml|yml|toml)(\?[^"]*)?' /tmp/telegram_page.html | sort -u | while read -r file_url; do
-              filename=$(basename "$file_url" | cut -d'?' -f1)
-              echo "📥 Found: $filename"
-              curl -sL -o "$BACKUP_DIR/$FOLDER_NAME/$filename" "$file_url"
-              if [ -f "$BACKUP_DIR/$FOLDER_NAME/$filename" ]; then
-                echo "✅ Downloaded: $filename"
-              fi
-            done
-          fi
-
-          # Try second API as backup
-          echo ""
-          echo "🔍 Checking secondary API for files..."
-          
-          curl -sL -o /tmp/post_data2.json "https://api.telegram.org/bot${BOT_TOKEN}/getUpdates" 2>/dev/null || true
-          
-          # Alternative: Use tgdownloader.com
-          curl -sL "https://tgdownloader.com/download?url=${TELEGRAM_LINK}" -o /tmp/tgdown.html 2>/dev/null || true
-          
-          # Extract any direct download links
-          grep -oP 'https?://[^"\'\'' ]+\.(exe|apk|zip|rar|7z|pdf|doc|docx|xls|xlsx|txt|mp4|mp3|jpg|jpeg|png|gif|webm|mkv|avi|mov|bin|dmg|iso|img|msi|deb|rpm|sh|bat|ps1|py|js|html|css|json|xml|sql|db|csv|log|ini|cfg|conf|yaml|yml|toml)' /tmp/telegram_page.html 2>/dev/null | sort -u | while read -r file_url; do
-            filename=$(basename "$file_url" | cut -d'?' -f1 | cut -d'#' -f1)
-            if [ ! -f "$BACKUP_DIR/$FOLDER_NAME/$filename" ]; then
-              echo "📥 Downloading extra file: $filename"
-              curl -sL -o "$BACKUP_DIR/$FOLDER_NAME/$filename" "$file_url"
-            fi
-          done
-
-          # Create README.md
-          echo ""
-          echo "📝 Creating README..."
-          
-          cd "$BACKUP_DIR/$FOLDER_NAME"
-          FILE_LIST=""
-          for file in *; do
-            if [ -f "$file" ]; then
-              size=$(stat -c%s "$file" 2>/dev/null || echo 0)
-              size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
-              FILE_LIST="${FILE_LIST}- **$file** (${size_mb} MB)\n"
-            fi
-          done
-          cd - > /dev/null
-          
-          {
-            echo "# 📩 Telegram Download: ${CHANNEL}/${MSG_ID}"
-            echo ""
-            echo "## 📋 Information"
-            echo "- **Channel:** @${CHANNEL}"
-            echo "- **Message ID:** ${MSG_ID}"
-            echo "- **Original Link:** [View Post](${TELEGRAM_LINK})"
-            echo "- **Download Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')"
-            echo ""
-            echo "## 📁 Downloaded Files"
-            echo ""
-            echo -e "$FILE_LIST"
-            echo ""
-            echo "## 🔗 Access Files"
-            echo ""
-            echo "Files are available in: \`telegram_downloads/${FOLDER_NAME}/\`"
-          } > "$BACKUP_DIR/$FOLDER_NAME/README.md"
-          
-          echo "✅ README created"
-          
-          # List all downloaded files
-          echo ""
-          echo "===== Downloaded Files ====="
-          find "$BACKUP_DIR/$FOLDER_NAME" -type f -name "*" -not -name "README.md" -exec basename {} \; | sort
-          
-          TOTAL_FILES=$(find "$BACKUP_DIR/$FOLDER_NAME" -type f -not -name "README.md" | wc -l)
-          echo ""
-          echo "✅ Total files downloaded: $TOTAL_FILES"
-          
-          # Cleanup
-          rm -f /tmp/post_data.json /tmp/post_data2.json /tmp/telegram_page.html /tmp/tgdown.html
-
-      - name: ذخیره‌سازی فایل‌های دانلود شده
+      - name: Commit and push downloaded files
         run: |
-          BRANCH="${GITHUB_REF_NAME}"
-          
-          echo "📤 Saving downloaded files to repository..."
-          BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
-          BACKUP_FILE_COUNT=$(find "$BACKUP_DIR" -type f -not -name "README.md" 2>/dev/null | wc -l)
-          
-          if [ "$BACKUP_FILE_COUNT" -eq 0 ]; then
-            echo "❌ No files were downloaded!"
-            exit 1
-          fi
-          
-          echo "📁 Total files to push: $BACKUP_FILE_COUNT"
-          
-          git fetch origin "$BRANCH"
-          git reset --hard origin/"$BRANCH" 2>/dev/null || true
-          
-          mkdir -p telegram_downloads
-          cp -r "$BACKUP_DIR"/* telegram_downloads/
-          
-          git add -A telegram_downloads/
-          
-          if git diff --cached --quiet; then
-            echo "✅ No new changes to commit"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          if git diff --staged --quiet; then
+            echo "No files downloaded"
           else
-            git commit -m "📩 Telegram download: ${{ github.event.inputs.telegram_link }} [skip ci]"
-            
-            # Try to push with retry
-            PUSH_SUCCESS=false
-            for i in {1..5}; do
-              if git push origin HEAD:"$BRANCH"; then
-                echo "✅ Successfully pushed to GitHub!"
-                PUSH_SUCCESS=true
-                break
-              fi
-              echo "⚠️ Push failed, retry $i/5..."
-              sleep 5
-              git pull origin "$BRANCH" --rebase 2>/dev/null || true
-            done
-            
-            if [ "$PUSH_SUCCESS" = false ]; then
-              echo "⚠️ Could not push, but files are saved locally"
-            fi
+            git commit -m "📩 Download from Telegram: ${{ github.event.inputs.telegram_link }}"
+            git push
           fi
-          
-          echo ""
-          echo "=========================================="
-          echo "✅ Download completed successfully!"
-          echo "📁 Files saved in: telegram_downloads/${FOLDER_NAME}/"
-          echo "=========================================="
