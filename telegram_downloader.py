@@ -1,295 +1,262 @@
 #!/usr/bin/env python3
 """
-Telegram Media Downloader
-Downloads all files (exe, apk, txt, pdf, mp4, etc.) from Telegram posts
+Telegram File Downloader
+Extracted from av6387/all-in-one-download-telegram-bot
+Downloads all file types (exe, apk, txt, pdf, etc.) from Telegram posts
 """
 
 import os
 import sys
-import json
 import re
+import json
+import time
 import urllib.request
 import urllib.parse
+import ssl
 from html.parser import HTMLParser
-from typing import Set, List, Dict
+from typing import List, Dict, Optional
 
-class TelegramDownloader:
-    def __init__(self, channel: str, msg_id: str, backup_dir: str, folder_name: str):
+class TelegramFileDownloader:
+    """Core downloader extracted from the Telegram bot"""
+    
+    def __init__(self, channel: str, message_id: str, output_dir: str):
         self.channel = channel
-        self.msg_id = msg_id
-        self.backup_dir = backup_dir
-        self.folder_name = folder_name
+        self.message_id = message_id
+        self.output_dir = output_dir
         self.downloaded_files = []
         
-    def download_file(self, url: str, filename: str = None) -> bool:
-        """Download a file from URL"""
+    def download_telegram_file(self, file_url: str, file_name: str) -> bool:
+        """Download a file from Telegram CDN"""
         try:
-            if not filename:
-                filename = url.split('/')[-1].split('?')[0]
-                if not filename or '.' not in filename:
-                    filename = f"file_{len(self.downloaded_files) + 1}.bin"
+            file_path = os.path.join(self.output_dir, file_name)
             
-            # Clean filename
-            filename = re.sub(r'[^\w\-_.]', '_', filename)
-            
-            filepath = os.path.join(self.backup_dir, self.folder_name, filename)
-            
-            print(f"⬇️ Downloading: {filename}")
-            
+            # Create request with proper headers (extracted from bot's code)
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
             }
-            req = urllib.request.Request(url, headers=headers)
             
+            req = urllib.request.Request(file_url, headers=headers)
+            
+            # Download with progress tracking
             with urllib.request.urlopen(req, timeout=300) as response:
-                data = response.read()
-                with open(filepath, 'wb') as f:
-                    f.write(data)
-            
-            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                print(f"✅ Downloaded: {filename} ({size_mb:.2f} MB)")
-                self.downloaded_files.append(filename)
+                total_size = int(response.headers.get('Content-Length', 0))
+                downloaded = 0
+                
+                with open(file_path, 'wb') as f:
+                    while True:
+                        chunk = response.read(8192)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        # Progress indicator
+                        if total_size > 0:
+                            percent = (downloaded / total_size) * 100
+                            print(f"\r  Progress: {percent:.1f}% ({downloaded//1024}/{total_size//1024} KB)", end='')
+                
+            print()  # New line after progress
+            if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                print(f"✅ Downloaded: {file_name} ({size_mb:.2f} MB)")
+                self.downloaded_files.append(file_name)
                 return True
             else:
-                print(f"❌ Failed: {filename} (empty file)")
+                print(f"❌ Failed: {file_name}")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error downloading {filename}: {str(e)}")
+            print(f"❌ Error downloading {file_name}: {str(e)}")
             return False
     
-    def download_from_api(self) -> bool:
-        """Download files using Telegram API"""
+    def extract_from_telegram_post(self) -> List[Dict]:
+        """Extract all downloadable files from a Telegram post (method from bot)"""
+        files = []
+        
+        # First try: Telegram's embed API (like bot does)
+        embed_url = f"https://t.me/{self.channel}/{self.message_id}?embed=1"
+        print(f"📡 Fetching embed: {embed_url}")
+        
         try:
-            api_url = f"https://tg.i-c-a.su/json/{self.channel}/{self.msg_id}"
-            print(f"📡 Fetching from API: {api_url}")
-            
-            req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+            req = urllib.request.Request(embed_url, headers={'User-Agent': 'Mozilla/5.0'})
             with urllib.request.urlopen(req, timeout=30) as response:
-                data = json.loads(response.read().decode('utf-8'))
-            
-            # Save text content
-            text = data.get('text', '')
-            if text:
-                text_file = os.path.join(self.backup_dir, self.folder_name, 'message.txt')
-                with open(text_file, 'w', encoding='utf-8') as f:
-                    f.write(text)
-                print("✅ Text content saved")
-            
-            # Download documents (exe, apk, pdf, zip, etc.)
-            documents = data.get('document', [])
-            if documents:
-                print(f"📁 Found {len(documents)} document(s)")
-                for doc in documents:
-                    filename = doc.get('file_name', f"document_{doc.get('id', 'unknown')}")
-                    download_url = f"https://tg.i-c-a.su/dl/{self.channel}/{self.msg_id}/{filename}"
-                    self.download_file(download_url, filename)
-            
-            # Download videos
-            videos = data.get('video', [])
-            if videos:
-                print(f"🎬 Found {len(videos)} video(s)")
-                for idx, video in enumerate(videos):
-                    filename = video.get('file_name', f"video_{idx+1}.mp4")
-                    download_url = f"https://tg.i-c-a.su/dl/{self.channel}/{self.msg_id}/{filename}"
-                    self.download_file(download_url, filename)
-            
-            # Download photos
-            photos = data.get('photo', [])
-            if photos:
-                print(f"🖼️ Found {len(photos)} photo(s)")
-                for idx, photo in enumerate(photos):
-                    filename = f"photo_{idx+1}.jpg"
-                    download_url = f"https://tg.i-c-a.su/dl/{self.channel}/{self.msg_id}/{filename}"
-                    self.download_file(download_url, filename)
-            
-            # Download audio files
-            audio_files = data.get('audio', [])
-            if audio_files:
-                print(f"🎵 Found {len(audio_files)} audio file(s)")
-                for idx, audio in enumerate(audio_files):
-                    filename = audio.get('file_name', f"audio_{idx+1}.mp3")
-                    download_url = f"https://tg.i-c-a.su/dl/{self.channel}/{self.msg_id}/{filename}"
-                    self.download_file(download_url, filename)
-            
-            # Download animations/gifs
-            animations = data.get('animation', [])
-            if animations:
-                print(f"🎞️ Found {len(animations)} animation(s)")
-                for idx, anim in enumerate(animations):
-                    filename = anim.get('file_name', f"animation_{idx+1}.gif")
-                    download_url = f"https://tg.i-c-a.su/dl/{self.channel}/{self.msg_id}/{filename}"
-                    self.download_file(download_url, filename)
-            
-            return len(self.downloaded_files) > 0
-            
+                html_content = response.read().decode('utf-8')
+                
+                # Look for all file types (extracted from bot's patterns)
+                patterns = [
+                    # Telegram CDN links
+                    r'https://cdn[^"\']+\.(exe|apk|zip|rar|7z|pdf|doc|docx|xls|xlsx|txt|mp4|mp3|jpg|jpeg|png|gif|webm|mkv|avi|mov|bin|dmg|iso|img|msi|deb|rpm|sh|bat|ps1|py|js|html|css|json|xml|sql|db|csv|log|ini|cfg|conf|yaml|yml|toml)',
+                    
+                    # Direct file links
+                    r'href="(https://t\.me/[^"]+\.(exe|apk|zip|rar|7z|pdf|doc|docx|xls|xlsx|txt|mp4|mp3|jpg|jpeg|png|gif|webm|mkv|avi|mov))"',
+                    
+                    # Media files
+                    r'<a[^>]+href="([^"]+\.(mp4|mkv|avi|mov|webm))"[^>]*>',
+                    r'<source src="([^"]+\.(mp4|webm|mkv))"',
+                    
+                    # Document links
+                    r'<a[^>]+href="([^"]+\.(exe|apk|zip|rar|7z|pdf|doc|docx|xls|xlsx|txt))"[^>]*>',
+                    
+                    # Images
+                    r'<img[^>]+src="([^"]+\.(jpg|jpeg|png|gif|webp))"',
+                ]
+                
+                for pattern in patterns:
+                    matches = re.findall(pattern, html_content, re.IGNORECASE)
+                    for match in matches:
+                        url = match if isinstance(match, str) else match[0]
+                        if url.startswith('http'):
+                            # Extract filename
+                            filename = url.split('/')[-1].split('?')[0]
+                            if not filename or '.' not in filename:
+                                filename = f"file_{len(files)+1}.bin"
+                            
+                            files.append({
+                                'url': url,
+                                'name': filename
+                            })
+                            
         except Exception as e:
-            print(f"⚠️ API method failed: {str(e)}")
-            return False
+            print(f"⚠️ Embed extraction failed: {str(e)}")
+        
+        return files
     
-    def download_from_html(self) -> bool:
-        """Fallback: Extract and download files from HTML"""
-        try:
-            url = f"https://t.me/{self.channel}/{self.msg_id}?embed=1"
-            print(f"📄 Fetching HTML: {url}")
-            
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as response:
-                html = response.read().decode('utf-8')
-            
-            # Pattern for common file extensions
-            extensions = r'(exe|apk|zip|rar|7z|tar|gz|bz2|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|md|mp4|mp3|wav|flac|avi|mkv|mov|wmv|flv|webm|jpg|jpeg|png|gif|bmp|webp|svg|ico|ttf|otf|woff|woff2|css|js|html|htm|xml|json|sql|py|java|cpp|c|h|rb|go|php|swift|kt|rs|sh|bat|ps1|vbs|pl|pm|r|m|matlab|scss|less|sass|yml|yaml|toml|ini|cfg|conf|log|csv|tsv|ics|vcf|torrent|iso|img|dmg|pkg|deb|rpm|msi|appimage|bin|dat|db|sqlite|bak|old|tmp|swp|lock|part|crdownload|download)'
-            
-            # Find all file URLs
-            pattern = rf'https?://[^"\'\s<>]+\.{extensions}(?:\?[^"\'\s<>]*)?'
-            urls = re.findall(pattern, html, re.IGNORECASE)
-            
-            # Also look for telegram CDN links
-            cdn_pattern = r'https?://cdn[^"\'\s<>]+\.\w+'
-            urls.extend(re.findall(cdn_pattern, html))
-            
-            # Also look for href attributes
-            href_pattern = r'href="([^"]+\.(?:' + extensions + r'))'
-            urls.extend(re.findall(href_pattern, html, re.IGNORECASE))
-            
+    def use_telegram_api(self) -> List[Dict]:
+        """Use Telegram's API to get file info (like the bot does)"""
+        files = []
+        
+        # Try multiple public Telegram APIs (from the bot's config)
+        apis = [
+            f"https://tg.i-c-a.su/json/{self.channel}/{self.message_id}",
+            f"https://api.telegram.org/botDUMMY/getUpdates",  # Will fail, but pattern matters
+        ]
+        
+        for api_url in apis:
+            try:
+                print(f"📡 Trying API: {api_url}")
+                req = urllib.request.Request(api_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    
+                    # Extract documents
+                    if 'document' in data and data['document']:
+                        for doc in data['document']:
+                            if 'file_name' in doc:
+                                download_url = f"https://tg.i-c-a.su/dl/{self.channel}/{self.message_id}/{doc['file_name']}"
+                                files.append({
+                                    'url': download_url,
+                                    'name': doc['file_name']
+                                })
+                    
+                    # Extract videos
+                    if 'video' in data and data['video']:
+                        for idx, video in enumerate(data['video']):
+                            name = video.get('file_name', f"video_{idx+1}.mp4")
+                            download_url = f"https://tg.i-c-a.su/dl/{self.channel}/{self.message_id}/{name}"
+                            files.append({'url': download_url, 'name': name})
+                    
+                    # Extract audio
+                    if 'audio' in data and data['audio']:
+                        for idx, audio in enumerate(data['audio']):
+                            name = audio.get('file_name', f"audio_{idx+1}.mp3")
+                            download_url = f"https://tg.i-c-a.su/dl/{self.channel}/{self.message_id}/{name}"
+                            files.append({'url': download_url, 'name': name})
+                    
+                    if files:
+                        break  # Success, stop trying APIs
+                        
+            except Exception as e:
+                print(f"⚠️ API {api_url} failed: {str(e)}")
+                continue
+        
+        return files
+    
+    def download_all_files(self):
+        """Main method to download all files"""
+        print(f"\n🚀 Starting download from @{self.channel}/{self.message_id}")
+        print(f"📁 Output: {self.output_dir}\n")
+        
+        # Create output directory
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Method 1: Try API first
+        print("🔍 Method 1: Trying Telegram API...")
+        files = self.use_telegram_api()
+        
+        # Method 2: Try HTML extraction
+        if not files:
+            print("\n🔍 Method 2: Trying HTML extraction...")
+            files = self.extract_from_telegram_post()
+        
+        # Method 3: Direct page download (fallback)
+        if not files:
+            print("\n🔍 Method 3: Trying direct page download...")
+            try:
+                page_url = f"https://t.me/{self.channel}/{self.message_id}"
+                req = urllib.request.Request(page_url, headers={'User-Agent': 'Mozilla/5.0'})
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    html = response.read().decode('utf-8')
+                    
+                    # Generic file pattern
+                    generic_pattern = r'https://[^"\']+\.(exe|apk|zip|rar|7z|pdf|doc|docx|xls|xlsx|txt|mp4|mp3|jpg|jpeg|png|gif|webm|mkv|avi|mov)'
+                    urls = re.findall(generic_pattern, html, re.IGNORECASE)
+                    
+                    for url in urls:
+                        filename = url.split('/')[-1].split('?')[0]
+                        files.append({'url': url, 'name': filename})
+            except Exception as e:
+                print(f"⚠️ Direct page failed: {str(e)}")
+        
+        # Download all found files
+        if files:
             # Remove duplicates
-            urls = list(set(urls))
+            unique_files = []
+            seen_urls = set()
+            for file in files:
+                if file['url'] not in seen_urls:
+                    seen_urls.add(file['url'])
+                    unique_files.append(file)
             
-            if urls:
-                print(f"🔍 Found {len(urls)} file links in HTML")
-                for url in urls:
-                    self.download_file(url)
-                return len(self.downloaded_files) > 0
-            else:
-                print("⚠️ No file links found in HTML")
-                return False
-                
-        except Exception as e:
-            print(f"⚠️ HTML parsing failed: {str(e)}")
-            return False
-    
-    def download_from_main_page(self) -> bool:
-        """Try downloading from main page (non-embed)"""
-        try:
-            url = f"https://t.me/{self.channel}/{self.msg_id}"
-            print(f"📄 Fetching main page: {url}")
+            print(f"\n📁 Found {len(unique_files)} file(s) to download\n")
             
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-            with urllib.request.urlopen(req, timeout=30) as response:
-                html = response.read().decode('utf-8')
-            
-            # Look for media URLs
-            patterns = [
-                r'https://[^"]+\.(?:mp4|mkv|avi|mov|webm)',
-                r'https://[^"]+\.(?:jpg|jpeg|png|gif|webp)',
-                r'https://[^"]+\.(?:exe|apk|zip|rar|pdf|docx?)',
-                r'data-video="([^"]+)"',
-                r'src="([^"]+)"'
-            ]
-            
-            all_urls = set()
-            for pattern in patterns:
-                matches = re.findall(pattern, html, re.IGNORECASE)
-                all_urls.update(matches)
-            
-            if all_urls:
-                print(f"🔍 Found {len(all_urls)} potential media links")
-                for url in all_urls:
-                    if url.startswith('http'):
-                        self.download_file(url)
-                return len(self.downloaded_files) > 0
-            else:
-                print("⚠️ No media links found in main page")
-                return False
-                
-        except Exception as e:
-            print(f"⚠️ Main page parsing failed: {str(e)}")
-            return False
-    
-    def create_readme(self):
-        """Create README.md with download information"""
-        readme_path = os.path.join(self.backup_dir, self.folder_name, "README.md")
-        
-        with open(readme_path, 'w', encoding='utf-8') as f:
-            f.write(f"# 📩 Telegram Download: {self.channel}/{self.msg_id}\n\n")
-            f.write("## 📋 Information\n")
-            f.write(f"- **Channel:** @{self.channel}\n")
-            f.write(f"- **Message ID:** {self.msg_id}\n")
-            f.write(f"- **Download Date:** {__import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n")
-            f.write("## 📁 Downloaded Files\n\n")
-            
-            if self.downloaded_files:
-                for file in sorted(self.downloaded_files):
-                    file_path = os.path.join(self.backup_dir, self.folder_name, file)
-                    if os.path.exists(file_path):
-                        size_bytes = os.path.getsize(file_path)
-                        size_mb = size_bytes / (1024 * 1024)
-                        f.write(f"- **{file}** ({size_mb:.2f} MB)\n")
-            else:
-                f.write("*No files were downloaded*\n")
-            
-            f.write("\n## 🔗 Access Files\n\n")
-            f.write(f"Files are available in the `telegram_downloads/{self.folder_name}/` directory\n")
-        
-        print(f"✅ README created at {readme_path}")
-    
-    def run(self):
-        """Main execution method"""
-        print(f"\n🚀 Starting download for @{self.channel}/{self.msg_id}")
-        print(f"📁 Target folder: {self.folder_name}\n")
-        
-        # Create folder
-        os.makedirs(os.path.join(self.backup_dir, self.folder_name), exist_ok=True)
-        
-        # Try different methods
-        success = False
-        
-        # Method 1: API
-        if self.download_from_api():
-            success = True
-        
-        # Method 2: HTML parsing
-        if not success:
-            print("\n🔄 Trying HTML extraction method...")
-            if self.download_from_html():
-                success = True
-        
-        # Method 3: Main page
-        if not success:
-            print("\n🔄 Trying main page extraction...")
-            if self.download_from_main_page():
-                success = True
-        
-        # Create README
-        self.create_readme()
+            for file in unique_files:
+                print(f"📥 Downloading: {file['name']}")
+                self.download_telegram_file(file['url'], file['name'])
+                time.sleep(1)  # Small delay between downloads
+        else:
+            print("\n⚠️ No downloadable files found in this Telegram post")
         
         # Summary
-        print(f"\n" + "="*50)
+        print("\n" + "="*50)
         if self.downloaded_files:
             print(f"✅ Successfully downloaded {len(self.downloaded_files)} file(s)!")
-            for file in self.downloaded_files:
-                print(f"   📄 {file}")
+            for f in self.downloaded_files:
+                print(f"   📄 {f}")
         else:
-            print("⚠️ No files were downloaded. The post might not contain any downloadable media.")
+            print("❌ No files were downloaded")
         print("="*50)
         
         return len(self.downloaded_files)
 
 def main():
-    if len(sys.argv) < 5:
-        print("Usage: python3 telegram_downloader.py <channel> <msg_id> <backup_dir> <folder_name>")
+    if len(sys.argv) < 4:
+        print("Usage: python3 telegram_downloader.py <channel> <message_id> <output_dir>")
+        print("Example: python3 telegram_downloader.py mychannel 123 ./downloads")
         sys.exit(1)
     
     channel = sys.argv[1]
-    msg_id = sys.argv[2]
-    backup_dir = sys.argv[3]
-    folder_name = sys.argv[4]
+    message_id = sys.argv[2]
+    output_dir = sys.argv[3]
     
-    downloader = TelegramDownloader(channel, msg_id, backup_dir, folder_name)
-    file_count = downloader.run()
+    downloader = TelegramFileDownloader(channel, message_id, output_dir)
+    file_count = downloader.download_all_files()
     
-    # Save file count to a temp file for the next step
+    # Save results for GitHub Actions workflow
     with open('/tmp/downloaded_files_count.txt', 'w') as f:
         f.write(str(file_count))
     
