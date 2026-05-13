@@ -18,7 +18,9 @@ jobs:
       - name: بررسی لینک تلگرام
         run: |
           if [ -z "${{ github.event.inputs.telegram_link }}" ]; then
+            echo ""
             echo "❌ لینک تلگرام وارد نشده است!"
+            echo ""
             exit 1
           fi
           echo "✅ لینک تلگرام دریافت شد"
@@ -38,10 +40,9 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3 python3-pip
-          pip3 install --upgrade pip
+          sudo apt-get install -y curl wget jq zip unzip python3
 
-      - name: دانلود از تلگرام با استفاده از کد استخراج شده
+      - name: دانلود از تلگرام با پایتون
         run: |
           TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
           
@@ -54,34 +55,28 @@ jobs:
           echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
           
           FOLDER_NAME="telegram_${CHANNEL}_${MSG_ID}"
-          DOWNLOAD_PATH="${BACKUP_DIR}/${FOLDER_NAME}"
           
-          echo "📩 Telegram Downloader (Extracted from av6387 bot)"
+          echo "📩 Telegram Downloader (Python)"
           echo "🔗 Link: $TELEGRAM_LINK"
           echo "📢 Channel: $CHANNEL"
           echo "📝 Message ID: $MSG_ID"
           echo ""
           
-          # Save the Python script
-          cat > telegram_downloader.py << 'EOF'
-# Paste the entire Python script from above here
-EOF
-          
-          # Run the downloader
-          python3 telegram_downloader.py "$CHANNEL" "$MSG_ID" "$DOWNLOAD_PATH"
+          # Run Python downloader
+          python3 telegram_downloader.py "$CHANNEL" "$MSG_ID" "$BACKUP_DIR" "$FOLDER_NAME"
           
           DOWNLOAD_STATUS=$?
           
-          # Save folder name for next step
-          echo "$FOLDER_NAME" > /tmp/folder_name.txt
-          
           if [ $DOWNLOAD_STATUS -eq 0 ]; then
-            echo "✅ Download completed successfully"
+            echo "✅ Python downloader completed successfully"
           else
-            echo "⚠️ Download completed with issues"
+            echo "⚠️ Python downloader completed with warnings"
           fi
+          
+          # Create a marker file with folder name
+          echo "$FOLDER_NAME" > /tmp/folder_name.txt
 
-      - name: ذخیره‌سازی فایل‌های دانلود شده در GitHub
+      - name: ذخیره‌سازی فایل‌های دانلود شده
         run: |
           BRANCH="${GITHUB_REF_NAME}"
           
@@ -104,33 +99,6 @@ EOF
           mkdir -p telegram_downloads
           cp -r "$BACKUP_DIR"/* telegram_downloads/
           
-          # Create a README for the download
-          cat > "telegram_downloads/${FOLDER_NAME}/README.md" << EOF
-# 📩 Telegram Download: ${CHANNEL}/${MSG_ID}
-
-## 📋 Information
-- **Channel:** @${CHANNEL}
-- **Message ID:** ${MSG_ID}
-- **Original Link:** [View Post](${{ github.event.inputs.telegram_link }})
-- **Download Date:** $(date '+%Y-%m-%d %H:%M:%S UTC')
-
-## 📁 Downloaded Files
-EOF
-          
-          # List files in README
-          cd "$BACKUP_DIR/$FOLDER_NAME"
-          for file in *; do
-            if [ -f "$file" ] && [ "$file" != "README.md" ]; then
-              size=$(stat -c%s "$file" 2>/dev/null || echo 0)
-              size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
-              echo "- **$file** (${size_mb} MB)" >> "../../../telegram_downloads/${FOLDER_NAME}/README.md"
-            fi
-          done
-          cd - > /dev/null
-          
-          echo "" >> "telegram_downloads/${FOLDER_NAME}/README.md"
-          echo "Files are available in this directory" >> "telegram_downloads/${FOLDER_NAME}/README.md"
-          
           git add -A telegram_downloads/
           
           if git diff --cached --quiet; then
@@ -138,20 +106,30 @@ EOF
           else
             git commit -m "📩 Telegram download: ${{ github.event.inputs.telegram_link }} [skip ci]"
             
-            # Push with retry
+            # Try to push with retry
+            PUSH_SUCCESS=false
             for i in {1..5}; do
               if git push origin HEAD:"$BRANCH"; then
                 echo "✅ Successfully pushed to GitHub!"
+                PUSH_SUCCESS=true
                 break
               fi
               echo "⚠️ Push failed, retry $i/5..."
               sleep 5
               git pull origin "$BRANCH" --rebase 2>/dev/null || true
             done
+            
+            if [ "$PUSH_SUCCESS" = false ]; then
+              echo "⚠️ Could not push to GitHub, but files are saved in workflow workspace"
+            fi
           fi
           
+          # Show downloaded files
           echo ""
           echo "=========================================="
           echo "✅ Download completed successfully!"
           echo "📁 Files saved in: telegram_downloads/${FOLDER_NAME}/"
+          echo ""
+          echo "📋 Downloaded files:"
+          ls -la "telegram_downloads/${FOLDER_NAME}/" 2>/dev/null || echo "Files not found in workspace"
           echo "=========================================="
