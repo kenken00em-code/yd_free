@@ -1,4 +1,3 @@
----
 name: 03 - 📩 دانلودر تلگرام
 
 on:
@@ -16,15 +15,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Check Telegram link provided
+      - name: بررسی لینک تلگرام
         run: |
           if [ -z "${{ github.event.inputs.telegram_link }}" ]; then
             echo ""
             echo "❌ لینک تلگرام وارد نشده است!"
-            echo ""
-            echo "📌 راهنما:"
-            echo "   1️⃣ workflow را دوباره اجرا کنید"
-            echo "   2️⃣ در فیلد 'لینک پست تلگرام' آدرس پست را وارد کنید"
             echo ""
             exit 1
           fi
@@ -36,27 +31,105 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
+      - name: Configure Git for Large Files
+        run: |
+          git config --global http.postBuffer 524288000
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
 
       - name: Install dependencies
         run: |
-          pip install beautifulsoup4 requests yt-dlp
+          sudo apt-get update
+          sudo apt-get install -y curl wget jq zip unzip python3
 
-      - name: Download media from Telegram
+      - name: دانلود از تلگرام با پایتون
         run: |
-          python download_telegram.py "${{ github.event.inputs.telegram_link }}"
-
-      - name: Commit and push downloaded files
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add .
-          if git diff --staged --quiet; then
-            echo "No files downloaded"
+          TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
+          
+          # Extract channel and message ID
+          CHANNEL=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | cut -d'/' -f1)
+          MSG_ID=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | cut -d'/' -f2 | sed 's|?.*||')
+          
+          BACKUP_DIR="/tmp/telegram_backup_$$"
+          mkdir -p "$BACKUP_DIR"
+          echo "$BACKUP_DIR" > /tmp/backup_dir_path.txt
+          
+          FOLDER_NAME="telegram_${CHANNEL}_${MSG_ID}"
+          
+          echo "📩 Telegram Downloader (Python)"
+          echo "🔗 Link: $TELEGRAM_LINK"
+          echo "📢 Channel: $CHANNEL"
+          echo "📝 Message ID: $MSG_ID"
+          echo ""
+          
+          # Run Python downloader
+          python3 telegram_downloader.py "$CHANNEL" "$MSG_ID" "$BACKUP_DIR" "$FOLDER_NAME"
+          
+          DOWNLOAD_STATUS=$?
+          
+          if [ $DOWNLOAD_STATUS -eq 0 ]; then
+            echo "✅ Python downloader completed successfully"
           else
-            git commit -m "📩 Download from Telegram: ${{ github.event.inputs.telegram_link }}"
-            git push
+            echo "⚠️ Python downloader completed with warnings"
           fi
+          
+          # Create a marker file with folder name
+          echo "$FOLDER_NAME" > /tmp/folder_name.txt
+
+      - name: ذخیره‌سازی فایل‌های دانلود شده
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          
+          echo "📤 Saving downloaded files to repository..."
+          BACKUP_DIR=$(cat /tmp/backup_dir_path.txt)
+          FOLDER_NAME=$(cat /tmp/folder_name.txt)
+          
+          BACKUP_FILE_COUNT=$(find "$BACKUP_DIR/$FOLDER_NAME" -type f -not -name "README.md" 2>/dev/null | wc -l)
+          
+          if [ "$BACKUP_FILE_COUNT" -eq 0 ]; then
+            echo "❌ No files were downloaded!"
+            exit 1
+          fi
+          
+          echo "📁 Total files to push: $BACKUP_FILE_COUNT"
+          
+          git fetch origin "$BRANCH"
+          git reset --hard origin/"$BRANCH" 2>/dev/null || true
+          
+          mkdir -p telegram_downloads
+          cp -r "$BACKUP_DIR"/* telegram_downloads/
+          
+          git add -A telegram_downloads/
+          
+          if git diff --cached --quiet; then
+            echo "✅ No new changes to commit"
+          else
+            git commit -m "📩 Telegram download: ${{ github.event.inputs.telegram_link }} [skip ci]"
+            
+            # Try to push with retry
+            PUSH_SUCCESS=false
+            for i in {1..5}; do
+              if git push origin HEAD:"$BRANCH"; then
+                echo "✅ Successfully pushed to GitHub!"
+                PUSH_SUCCESS=true
+                break
+              fi
+              echo "⚠️ Push failed, retry $i/5..."
+              sleep 5
+              git pull origin "$BRANCH" --rebase 2>/dev/null || true
+            done
+            
+            if [ "$PUSH_SUCCESS" = false ]; then
+              echo "⚠️ Could not push to GitHub, but files are saved in workflow workspace"
+            fi
+          fi
+          
+          # Show downloaded files
+          echo ""
+          echo "=========================================="
+          echo "✅ Download completed successfully!"
+          echo "📁 Files saved in: telegram_downloads/${FOLDER_NAME}/"
+          echo ""
+          echo "📋 Downloaded files:"
+          ls -la "telegram_downloads/${FOLDER_NAME}/" 2>/dev/null || echo "Files not found in workspace"
+          echo "=========================================="
