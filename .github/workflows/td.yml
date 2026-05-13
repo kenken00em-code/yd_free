@@ -19,14 +19,7 @@ jobs:
       - name: بررسی لینک تلگرام
         run: |
           if [ -z "${{ github.event.inputs.telegram_link }}" ]; then
-            echo ""
             echo "❌ لینک تلگرام وارد نشده است!"
-            echo ""
-            echo "📌 راهنما:"
-            echo "   1️⃣ workflow را دوباره اجرا کنید"
-            echo "   2️⃣ در فیلد 'لینک پست تلگرام' آدرس پست را وارد کنید"
-            echo "   3️⃣ مثال: https://t.me/channel_name/123"
-            echo ""
             exit 1
           fi
           echo "✅ لینک تلگرام دریافت شد"
@@ -37,38 +30,24 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
-      - name: Configure Git for Large Files
+      - name: Configure Git
         run: |
-          git config --global http.postBuffer 524288000
-          git config --global http.maxRequestBuffer 100M
-          git config --global core.compression 0
-          git config --global pack.windowMemory 256m
-          git config --global pack.packSizeLimit 100m
-          git config --global pack.threads 1
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
 
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl wget zip bc
+          sudo apt-get install -y curl wget zip
 
       - name: دانلود فایل از تلگرام
         run: |
           TELEGRAM_LINK="${{ github.event.inputs.telegram_link }}"
           
-          REPO_OWNER="${{ github.repository_owner }}"
-          REPO_NAME="${{ github.event.repository.name }}"
-          BRANCH="${GITHUB_REF_NAME}"
-          
-          SPLIT_MB=45
-          SPLIT_BYTES=$(( SPLIT_MB * 1024 * 1024 ))
-          
           mkdir -p telegram_downloads
           
           echo "📩 Telegram Downloader"
           echo "🔗 Link: $TELEGRAM_LINK"
-          echo ""
 
           # Extract channel and message ID
           CLEAN_LINK=$(echo "$TELEGRAM_LINK" | sed 's|https://t.me/||' | sed 's|http://t.me/||' | sed 's|/$||')
@@ -77,153 +56,184 @@ jobs:
           
           echo "📢 Channel: @$CHANNEL"
           echo "📝 Message ID: $MSG_ID"
-          echo ""
 
-          # Fetch the Telegram page
-          EMBED_URL="https://t.me/${CHANNEL}/${MSG_ID}?embed=1"
-          echo "📥 Fetching: $EMBED_URL"
+          # Fetch the Telegram embed page
+          EMBED_URL="https://t.me/${CHANNEL}/${MSG_ID}?embed=1&mode=compact"
           
-          curl -sL -o /tmp/telegram_page.html \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
+          curl -sL -o /tmp/page.html \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8" \
+            -H "Accept-Language: en-US,en;q=0.5" \
             "$EMBED_URL"
           
-          if [ ! -s /tmp/telegram_page.html ]; then
+          if [ ! -s /tmp/page.html ]; then
             echo "❌ Failed to fetch page"
             exit 1
           fi
           
-          echo "✅ Page fetched"
-          echo ""
+          echo "✅ Page fetched ($(wc -c < /tmp/page.html) bytes)"
 
-          # Get post text for naming
-          POST_TEXT=$(grep -oP 'class="tgme_widget_message_text"[^>]*>\K[^<]+' /tmp/telegram_page.html | head -1 | sed 's/<[^>]*>//g' | tr -d '\n\r' | tr ' ' '_' | tr -c 'a-zA-Z0-9_\-\.' '_' | sed 's/__*/_/g' | sed 's/^_//' | sed 's/_$//' | cut -c1-50 || echo "${CHANNEL}_${MSG_ID}")
+          # Get post text for file naming
+          POST_TEXT=$(grep -oP 'class="tgme_widget_message_text"[^>]*>.*?</div>' /tmp/page.html | sed 's/<[^>]*>//g' | sed 's/&amp;/\&/g' | sed 's/&lt;/</g' | sed 's/&gt;/>/g' | tr -d '\n\r' | tr ' ' '_' | tr -c 'a-zA-Z0-9_' '_' | sed 's/__*/_/g' | sed 's/^_//' | sed 's/_$//' | cut -c1-40 || echo "")
           
-          if [ -z "$POST_TEXT" ]; then
-            POST_TEXT="${CHANNEL}_${MSG_ID}"
+          [ -z "$POST_TEXT" ] && POST_TEXT="${CHANNEL}_${MSG_ID}"
+          
+          echo "📝 Name: $POST_TEXT"
+
+          # Collect ALL downloadable URLs
+          > /tmp/urls.txt
+          
+          # Method 1: Video sources
+          grep -oP '<source src="[^"]*"' /tmp/page.html | grep -oP 'https://[^"]*' >> /tmp/urls.txt
+          
+          # Method 2: Document links (APK, ZIP, PDF, etc.)
+          grep -oP 'class="tgme_widget_message_document_wrap"[^>]*' /tmp/page.html | grep -oP 'href="[^"]*"' | sed 's/href="//;s/"//' >> /tmp/urls.txt
+          
+          # Method 3: Photo/video wrappers
+          grep -oP 'class="tgme_widget_message_(photo|video)_wrap"[^>]*' /tmp/page.html | grep -oP 'href="[^"]*"' | sed 's/href="//;s/"//' >> /tmp/urls.txt
+          
+          # Method 4: Background images
+          grep -oP "url\('[^']*'\)" /tmp/page.html | sed "s/url('//;s/')//" >> /tmp/urls.txt
+          
+          # Method 5: Any CDN links
+          grep -oP 'https://cdn[0-9]?\.?[a-zA-Z0-9.-]*/[^"<> ]*' /tmp/page.html | grep -vE '\.(css|js|ico|svg)$' >> /tmp/urls.txt
+          
+          # Method 6: Any t.me file links
+          grep -oP 'https://t\.me/[a-zA-Z0-9_/]*[^"<> ]*' /tmp/page.html >> /tmp/urls.txt
+          
+          # Method 7: Direct file links with extensions
+          grep -oP 'https://[^"<> ]+\.(apk|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|txt|exe|msi|dmg|iso|tar|gz|mp4|webm|mov|mkv|avi|mp3|ogg|wav|flac|aac|m4a|jpg|jpeg|png|webp|gif)[^"<> ]*' /tmp/page.html >> /tmp/urls.txt
+          
+          # Remove duplicates and empty lines
+          sort -u /tmp/urls.txt | sed '/^$/d' > /tmp/clean_urls.txt
+          
+          TOTAL_URLS=$(wc -l < /tmp/clean_urls.txt)
+          echo "🔍 Found $TOTAL_URLS URLs"
+          
+          if [ "$TOTAL_URLS" -eq 0 ]; then
+            echo ""
+            echo "⚠️ No media files found in this post"
+            echo "📄 Page preview:"
+            head -20 /tmp/page.html
+            exit 1
           fi
-          
-          echo "📝 Post name: $POST_TEXT"
-          echo ""
 
-          DOWNLOADED=0
-
-          # ----- DOWNLOAD ALL MEDIA FILES FROM THE POST -----
-          
-          # 1. Extract and download the MAIN file/link from the post
-          # Telegram CDN files (documents, APK, ZIP, etc.)
-          echo "🔍 Searching for files..."
-          
-          # Find document download links
-          grep -oP 'href="https://t\.me/[^"]+' /tmp/telegram_page.html > /tmp/all_links.txt
-          grep -oP 'https://cdn[^"<> ]+' /tmp/telegram_page.html | grep -vE '\.(css|js|ico|svg|woff|woff2)' >> /tmp/all_links.txt
-          grep -oP 'https://[^"<> ]+\.(apk|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|txt|exe|msi|dmg|iso|tar|gz|bz2|xz|epub|mobi|deb|rpm|torrent|magnet)[^"<> ]*' /tmp/telegram_page.html >> /tmp/all_links.txt
-          
-          # Find video sources
-          grep -oP '<source src="[^"]+"' /tmp/telegram_page.html | grep -oP 'https://[^"]+' >> /tmp/all_links.txt
-          grep -oP 'https://[^"<> ]+\.(mp4|webm|mov|mkv|avi)[^"<> ]*' /tmp/telegram_page.html >> /tmp/all_links.txt
-          
-          # Find images
-          grep -oP 'https://cdn[^"<> ]+\.(jpg|jpeg|png|webp|gif)[^"<> ]*' /tmp/telegram_page.html >> /tmp/all_links.txt
-          grep -oP "url\('(https://[^']+)'\)" /tmp/telegram_page.html | sed "s/url('//" | sed "s/')//" >> /tmp/all_links.txt
-          
-          # Find audio
-          grep -oP 'https://[^"<> ]+\.(mp3|ogg|wav|flac|aac|m4a|opus)[^"<> ]*' /tmp/telegram_page.html >> /tmp/all_links.txt
-          
-          # Sort and remove duplicates
-          sort -u /tmp/all_links.txt > /tmp/unique_links.txt
-          
           # Download each file
-          FILE_COUNT=0
+          DOWNLOADED=0
+          COUNT=0
+          
           while IFS= read -r FILE_URL; do
             [ -z "$FILE_URL" ] && continue
-            FILE_COUNT=$((FILE_COUNT + 1))
+            COUNT=$((COUNT + 1))
             
-            # Get original filename and extension
-            RAW_NAME=$(basename "$FILE_URL" | sed 's|?.*||' | sed 's|#.*||')
-            EXT="${RAW_NAME##*.}"
+            # Get extension from URL
+            EXT=$(echo "$FILE_URL" | grep -oP '\.(apk|pdf|zip|rar|7z|doc|docx|xls|xlsx|ppt|pptx|txt|exe|msi|dmg|iso|tar|gz|mp4|webm|mov|mkv|avi|mp3|ogg|wav|flac|aac|m4a|jpg|jpeg|png|webp|gif)' | head -1 | sed 's/^\.//')
             
-            # Skip if no extension
+            # Default extension
             [ -z "$EXT" ] && EXT="file"
             
-            # Use post text as filename, keep original extension
-            if [ $FILE_COUNT -eq 1 ]; then
-              FILE_NAME="${POST_TEXT}.${EXT}"
+            # Handle special cases
+            case "$EXT" in
+              jpeg) EXT="jpg" ;;
+              webm) EXT="mp4" ;;
+            esac
+            
+            # Create filename
+            if [ $COUNT -eq 1 ]; then
+              FILENAME="${POST_TEXT}.${EXT}"
             else
-              FILE_NAME="${POST_TEXT}_${FILE_COUNT}.${EXT}"
+              FILENAME="${POST_TEXT}_${COUNT}.${EXT}"
             fi
             
-            echo "⬇️ [${FILE_COUNT}] Downloading: $FILE_NAME"
+            echo ""
+            echo "⬇️ [${COUNT}/${TOTAL_URLS}] $FILENAME"
+            echo "   URL: ${FILE_URL:0:80}..."
             
-            curl -sL -o "telegram_downloads/${FILE_NAME}" \
-              -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-              -H "Referer: https://t.me/" \
-              --max-time 600 \
-              "$FILE_URL"
+            # Download with retry
+            for i in 1 2 3; do
+              curl -sL --max-time 300 \
+                -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+                -H "Referer: https://t.me/" \
+                -o "telegram_downloads/${FILENAME}" \
+                "$FILE_URL"
+              
+              if [ -f "telegram_downloads/${FILENAME}" ] && [ -s "telegram_downloads/${FILENAME}" ]; then
+                SIZE=$(stat -c%s "telegram_downloads/${FILENAME}")
+                SIZE_MB=$(( SIZE / 1024 / 1024 ))
+                
+                # Check if it's HTML (failed download)
+                if head -c 100 "telegram_downloads/${FILENAME}" | grep -qi "<html\|<!DOCTYPE"; then
+                  rm "telegram_downloads/${FILENAME}"
+                  echo "   ⚠️ Got HTML page instead of file (attempt $i)"
+                  [ $i -lt 3 ] && sleep 3
+                  continue
+                fi
+                
+                echo "   ✅ Saved (${SIZE_MB} MB)"
+                DOWNLOADED=$((DOWNLOADED + 1))
+                break
+              else
+                rm -f "telegram_downloads/${FILENAME}"
+                [ $i -lt 3 ] && sleep 2
+              fi
+            done
             
-            if [ -f "telegram_downloads/${FILE_NAME}" ] && [ -s "telegram_downloads/${FILE_NAME}" ]; then
-              SIZE=$(stat -c%s "telegram_downloads/${FILE_NAME}" 2>/dev/null || echo 0)
-              SIZE_MB=$(( SIZE / 1024 / 1024 ))
-              echo "   ✅ Saved (${SIZE_MB} MB)"
-              DOWNLOADED=$((DOWNLOADED + 1))
-            else
-              rm -f "telegram_downloads/${FILE_NAME}"
-              echo "   ⚠️ Empty or failed"
-            fi
-          done < /tmp/unique_links.txt
+            [ ! -f "telegram_downloads/${FILENAME}" ] && echo "   ❌ Failed"
+            
+          done < /tmp/clean_urls.txt
           
           # Cleanup
-          rm -f /tmp/telegram_page.html /tmp/all_links.txt /tmp/unique_links.txt
+          rm -f /tmp/page.html /tmp/urls.txt /tmp/clean_urls.txt
           
           echo ""
-          if [ "$DOWNLOADED" -eq 0 ]; then
-            echo "❌ No files downloaded!"
-            exit 1
-          else
-            echo "=========================================="
-            echo "✅ Downloaded $DOWNLOADED file(s)"
+          echo "=========================================="
+          if [ "$DOWNLOADED" -gt 0 ]; then
+            echo "✅ Downloaded $DOWNLOADED file(s):"
             ls -lh telegram_downloads/
-            echo "=========================================="
+          else
+            echo "❌ No files downloaded!"
+            echo ""
+            echo "Debug - Page content preview:"
+            grep -oP 'tgme_widget_message_\w+' /tmp/page.html 2>/dev/null | sort -u || echo "No widgets found"
+            exit 1
           fi
+          echo "=========================================="
 
       - name: ذخیره‌سازی فایل‌ها
         run: |
           BRANCH="${GITHUB_REF_NAME}"
-          
-          echo "📤 Pushing files..."
           
           if [ -z "$(ls -A telegram_downloads 2>/dev/null)" ]; then
             echo "❌ No files to push"
             exit 1
           fi
           
-          git fetch origin "$BRANCH"
+          echo "📤 Pushing files..."
+          
+          git fetch origin "$BRANCH" --depth=1
           git reset --hard origin/"$BRANCH"
           
           git add -A telegram_downloads/
           
-          if ! git diff --cached --quiet; then
-            git commit -m "📩 Telegram: ${{ github.event.inputs.telegram_link }} [skip ci]"
-            
-            RETRY=0
-            while [ $RETRY -lt 10 ]; do
-              RETRY=$((RETRY + 1))
-              if timeout 300 git push origin HEAD:"$BRANCH"; then
-                echo "✅ Push successful!"
-                break
-              else
-                echo "⚠️ Push failed, retry $RETRY/10..."
-                sleep 5
-                git fetch origin "$BRANCH"
-                git reset --hard origin/"$BRANCH"
-                git add -A telegram_downloads/
-                git diff --cached --quiet || git commit -m "📩 Telegram [skip ci]"
-              fi
-            done
-          else
+          if git diff --cached --quiet; then
             echo "No changes to push"
+            exit 0
           fi
           
-          echo ""
-          echo "=========================================="
-          echo "✅ Done!"
-          echo "=========================================="
+          git commit -m "📩 Telegram: ${{ github.event.inputs.telegram_link }} [skip ci]"
+          
+          for i in 1 2 3 4 5; do
+            if timeout 120 git push origin HEAD:"$BRANCH"; then
+              echo "✅ Push successful!"
+              exit 0
+            fi
+            echo "⚠️ Push failed, retry $i/5..."
+            sleep 3
+            git fetch origin "$BRANCH" --depth=1
+            git reset --hard origin/"$BRANCH"
+            git add -A telegram_downloads/
+            git commit -m "📩 Telegram [skip ci]" 2>/dev/null || true
+          done
+          
+          echo "❌ Push failed after 5 attempts"
+          exit 1
