@@ -1,10 +1,2 @@
-# Downloaded list :
-
-- [197e871e70b60e224e64926f0444ea91](./197e871e70b60e224e64926f0444ea91)
-- [267636a871838d67f36dbb095a504d3a](./267636a871838d67f36dbb095a504d3a)
-- [292d2c1109ced82ef60478203101d3f2](./292d2c1109ced82ef60478203101d3f2)
-- [51c99a62d9aeb72cc5409bedd7ae627c](./51c99a62d9aeb72cc5409bedd7ae627c)
-- [6a7c21f2381a3cee7e9ba6c2742efd37](./6a7c21f2381a3cee7e9ba6c2742efd37)
-- [b67add4c2294ca570138e8b24c2b2521](./b67add4c2294ca570138e8b24c2b2521)
-- [e8ef6dcbfd3836fd87fb9ecbb7cd92fc](./e8ef6dcbfd3836fd87fb9ecbb7cd92fc)
-- [f2a6757bdeefb016e4134bc22bb22476](./f2a6757bdeefb016e4134bc22bb22476)
+## خالی
+برای شروع به تب Actions رفته و از گردش‌کارهای سمت چپ استفاده کنید
