@@ -2,4 +2,8 @@
 
 ----
 
-- 1 - 📺 [【MMD放サモ⧸獣人MMD】愛包ダンスホール【ホロケウカムイ＆龍肆】](https://github.com/kenken00em-code/yd_free/tree/main/videos/%E3%80%90MMD%E6%94%BE%E3%82%B5%E3%83%A2%E2%A7%B8%E7%8D%A3%E4%BA%BAMMD%E3%80%91%E6%84%9B%E5%8C%85%E3%83%80%E3%83%B3%E3%82%B9%E3%83%9B%E3%83%BC%E3%83%AB%E3%80%90%E3%83%9B%E3%83%AD%E3%82%B1%E3%82%A6%E3%82%AB%E3%83%A0%E3%82%A4%EF%BC%86%E9%BE%8D%E8%82%86%E3%80%91)
+- 1 - 🎬 [How-to-make-3D-Games-in-Godot](https://github.com/kenken00em-code/yd_free/tree/main/videos/How-to-make-3D-Games-in-Godot)
+- 2 - 🎬 [How-to-make-VFX-in-Godot](https://github.com/kenken00em-code/yd_free/tree/main/videos/How-to-make-VFX-in-Godot)
+- 3 - 📽️ [How-to-program-in-Godot-GDScript-Tutorial](https://github.com/kenken00em-code/yd_free/tree/main/videos/How-to-program-in-Godot-GDScript-Tutorial)
+- 4 - 🎞️ [Lighting-in-Godot-for-Beginners](https://github.com/kenken00em-code/yd_free/tree/main/videos/Lighting-in-Godot-for-Beginners)
+- 5 - ▶️ [【MMD放サモ⧸獣人MMD】愛包ダンスホール【ホロケウカムイ＆龍肆】](https://github.com/kenken00em-code/yd_free/tree/main/videos/%E3%80%90MMD%E6%94%BE%E3%82%B5%E3%83%A2%E2%A7%B8%E7%8D%A3%E4%BA%BAMMD%E3%80%91%E6%84%9B%E5%8C%85%E3%83%80%E3%83%B3%E3%82%B9%E3%83%9B%E3%83%BC%E3%83%AB%E3%80%90%E3%83%9B%E3%83%AD%E3%82%B1%E3%82%A6%E3%82%AB%E3%83%A0%E3%82%A4%EF%BC%86%E9%BE%8D%E8%82%86%E3%80%91)
